@@ -1,0 +1,991 @@
+import React, { useState, useEffect } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, ScrollView, Alert, Modal, Image } from 'react-native';
+import { 
+  Truck, 
+  Check, 
+  Power, 
+  AlertCircle, 
+  CheckCircle2, 
+  Hospital, 
+  Navigation, 
+  LogOut, 
+  Phone, 
+  MessageSquare, 
+  MapPin, 
+  Users, 
+  User, 
+  ExternalLink 
+} from 'lucide-react-native';
+import { theme } from '../../lib/theme';
+import { EmergencyStatus, CrewAvailability, EMERGENCY_STATUS_ORDER, STATUS_LABELS, CANCELLATION_REASONS, Profile } from '@mediconnect/shared';
+import { ambulanceService } from '../../services/ambulanceService';
+import { mapNavigationService } from '../../services/mapNavigationService';
+import { notificationService } from '../../services/notificationService';
+import { backgroundLocationService } from '../../services/backgroundLocationService';
+import { distanceService } from '../../services/distanceService';
+
+interface AmbulanceHomeScreenProps {
+  onSwitchRole: () => void;
+  onOpenHospitalPicker?: () => void;
+  onOpenLiveTracking?: () => void;
+  userProfile?: Profile | null;
+}
+
+export const AmbulanceHomeScreen: React.FC<AmbulanceHomeScreenProps> = ({ 
+  onSwitchRole, 
+  onOpenHospitalPicker, 
+  onOpenLiveTracking,
+  userProfile
+}) => {
+  const [availability, setAvailability] = useState<CrewAvailability>('ONLINE');
+  const [isApproved] = useState(true); // Main admin approval state
+
+  // Simulated Incoming Dispatch Alert with 60s countdown
+  const [incomingOffer, setIncomingOffer] = useState<{
+    id: string;
+    distance: string;
+    patientLocation: string;
+    patientName: string;
+    patientPhone: string;
+    contactName: string;
+    contactPhone: string;
+  } | null>({
+    id: 'emg-live-892',
+    distance: '2.1 km away',
+    patientLocation: '742 Market St, Near Greams Road Metro',
+    patientName: 'Karthik',
+    patientPhone: '+919876543210',
+    contactName: 'Priya (Emergency Contact)',
+    contactPhone: '+919876543212'
+  });
+  const [countdown, setCountdown] = useState(60);
+
+  // Active Emergency Assignment state with Patient & Emergency Contact details
+  const [activeEmergency, setActiveEmergency] = useState<{
+    id: string;
+    statusIndex: number;
+    patientName: string;
+    patientPhone: string;
+    patientBlood: string;
+    patientNotes: string;
+    contactName: string;
+    contactPhone: string;
+    hospitalName: string;
+    hospitalAddress: string;
+    hospitalPhone: string;
+    patientLat: number;
+    patientLng: number;
+    hospitalLat: number;
+    hospitalLng: number;
+  } | null>(null);
+
+  // Cancellation Modal
+  const [cancelModalVisible, setCancelModalVisible] = useState(false);
+
+  // 60-second countdown timer for offered SOS request
+  useEffect(() => {
+    let timer: NodeJS.Timeout;
+    if (incomingOffer && countdown > 0 && !activeEmergency) {
+      // Trigger native notification for incoming offer
+      notificationService.dispatchAmbulanceOffer({
+        offerId: incomingOffer.id,
+        distance: incomingOffer.distance,
+        patientLocation: incomingOffer.patientLocation
+      });
+
+      timer = setInterval(() => {
+        setCountdown(prev => {
+          if (prev <= 1) {
+            setIncomingOffer(null);
+            Alert.alert('Offer Expired', 'The 60-second response window has expired. Re-routing dispatch.');
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    }
+    return () => clearInterval(timer);
+  }, [incomingOffer, countdown, activeEmergency]);
+
+  const crewId = userProfile?.id || '33333333-3333-3333-3333-333333333333';
+
+  const handleToggleOnline = async () => {
+    if (activeEmergency) {
+      Alert.alert('Operation Active', 'Cannot go offline while assigned to an active emergency.');
+      return;
+    }
+    const nextState = availability === 'ONLINE' ? 'OFFLINE' : 'ONLINE';
+    setAvailability(nextState);
+    await ambulanceService.updateAvailability(crewId, nextState);
+  };
+
+  const handleAcceptEmergency = async () => {
+    if (!incomingOffer) return;
+    
+    // Call atomic RPC assignment
+    const result = await ambulanceService.acceptEmergency(incomingOffer.id, crewId);
+    
+    if (result.success) {
+      setAvailability('BUSY');
+      const emgId = incomingOffer.id;
+      setActiveEmergency({
+        id: emgId,
+        statusIndex: 0, // 'REQUEST_ACCEPTED'
+        patientName: incomingOffer.patientName,
+        patientPhone: incomingOffer.patientPhone,
+        patientBlood: 'O+',
+        patientNotes: 'Allergies: Penicillin',
+        contactName: incomingOffer.contactName,
+        contactPhone: incomingOffer.contactPhone,
+        hospitalName: 'Apollo Hospitals Greams Road (Level 1 Trauma)',
+        hospitalAddress: '21 Greams Lane, Thousand Lights, Chennai',
+        hospitalPhone: '+914428290200',
+        patientLat: 13.0604,
+        patientLng: 80.2496,
+        hospitalLat: 13.0604,
+        hospitalLng: 80.2505
+      });
+      setIncomingOffer(null);
+
+      // Start Android Foreground Service & Background GPS broadcast
+      await backgroundLocationService.startTracking({
+        incidentId: emgId,
+        role: 'AMBULANCE_PERSONNEL',
+        userId: crewId
+      });
+
+      // Dispatch alert
+      await notificationService.dispatchStatusUpdate({
+        statusLabel: 'Dispatch Accepted',
+        details: 'Navigating to patient location. Live GPS broadcasting active.'
+      });
+
+      Alert.alert('Emergency Accepted', 'Atomic lock acquired. Navigation route generated.');
+    } else {
+      Alert.alert('Dispatch Claimed', result.message || 'Already accepted by a nearer responder.');
+      setIncomingOffer(null);
+    }
+  };
+
+  const handleRejectEmergency = () => {
+    setIncomingOffer(null);
+    Alert.alert('Offer Rejected', 'Dispatch engine will route to the next nearest crew.');
+  };
+
+  const handleNextStatus = async () => {
+    if (!activeEmergency) return;
+    const nextIndex = activeEmergency.statusIndex + 1;
+
+    if (nextIndex < EMERGENCY_STATUS_ORDER.length) {
+      const newStatus = EMERGENCY_STATUS_ORDER[nextIndex];
+      setActiveEmergency({
+        ...activeEmergency,
+        statusIndex: nextIndex
+      });
+      await ambulanceService.updateEmergencyStatus(activeEmergency.id, newStatus, crewId);
+      
+      // Dispatch status push notification
+      await notificationService.dispatchStatusUpdate({
+        statusLabel: STATUS_LABELS[newStatus],
+        details: `Emergency assignment advanced to ${STATUS_LABELS[newStatus]}.`
+      });
+
+      Alert.alert('Status Updated', `Emergency advanced to: ${STATUS_LABELS[newStatus]}`);
+    } else {
+      // 7th step completed -> Emergency Resolved!
+      await backgroundLocationService.stopTracking();
+      await ambulanceService.updateEmergencyStatus(activeEmergency.id, 'EMERGENCY_RESOLVED', crewId);
+      
+      await notificationService.dispatchStatusUpdate({
+        statusLabel: 'Emergency Resolved',
+        details: 'Patient safely delivered to trauma center. Incident completed.'
+      });
+
+      setActiveEmergency(null);
+      setAvailability('ONLINE');
+      Alert.alert('Emergency Resolved', 'Live GPS tracking has been stopped. Incident resolved successfully.');
+    }
+  };
+
+  const handleConfirmCancel = async (reason: string) => {
+    setCancelModalVisible(false);
+    await backgroundLocationService.stopTracking();
+    if (activeEmergency) {
+      await ambulanceService.cancelAssignment(activeEmergency.id, crewId, reason);
+    }
+    setActiveEmergency(null);
+    setAvailability('ONLINE');
+    Alert.alert('Assignment Cancelled', `Cancellation reason recorded: "${reason}". Emergency returned to pool for reassignment.`);
+  };
+
+  const currentStatus: EmergencyStatus | null = activeEmergency 
+    ? EMERGENCY_STATUS_ORDER[activeEmergency.statusIndex] 
+    : null;
+
+  // Real Google Maps Static Map Image URL
+  const googleMapStaticUrl = activeEmergency ? mapNavigationService.getStaticMapUrl({
+    centerLat: activeEmergency.patientLat,
+    centerLng: activeEmergency.patientLng,
+    zoom: 14,
+    width: 600,
+    height: 320,
+    markers: [
+      { lat: activeEmergency.patientLat, lng: activeEmergency.patientLng, color: 'red', label: 'P' },
+      { lat: 13.0720, lng: 80.2610, color: 'green', label: 'A' },
+      { lat: activeEmergency.hospitalLat, lng: activeEmergency.hospitalLng, color: 'blue', label: 'H' }
+    ]
+  }) : '';
+
+  return (
+    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+      {/* Header */}
+      <View style={styles.header}>
+        <View>
+          <Text style={styles.greeting}>Crew Command</Text>
+          <Text style={styles.roleTag}>
+            {userProfile?.fullName || 'Paramedic Unit Officer'} • TN-01-AMB-4091
+          </Text>
+        </View>
+        <TouchableOpacity style={styles.switchButton} onPress={onSwitchRole}>
+          <LogOut size={16} color={theme.colors.accent} />
+          <Text style={styles.switchButtonText}>Sign Out</Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* Admin Approval & Availability Status Bar */}
+      <View style={styles.statusCard}>
+        <View style={styles.statusRow}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            <CheckCircle2 size={18} color={isApproved ? theme.colors.success : theme.colors.warning} />
+            <Text style={styles.approvalText}>
+              {isApproved ? 'Admin Verified & Approved' : 'Pending Main Admin Approval'}
+            </Text>
+          </View>
+          <TouchableOpacity
+            style={[
+              styles.powerButton,
+              availability === 'ONLINE' ? styles.powerOnline : styles.powerOffline
+            ]}
+            onPress={handleToggleOnline}
+          >
+            <Power size={14} color="#FFFFFF" />
+            <Text style={styles.powerButtonText}>{availability}</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      {/* Active Assignment 7-Step Sequence Manager */}
+      {activeEmergency && currentStatus ? (
+        <View style={styles.activeJobCard}>
+          <View style={styles.jobHeader}>
+            <Truck size={24} color="#0284C7" />
+            <View style={{ flex: 1, marginLeft: theme.spacing.sm }}>
+              <Text style={styles.jobTitle}>ACTIVE DISPATCH IN PROGRESS</Text>
+              <Text style={styles.jobSubtitle}>Incident ID: {activeEmergency.id}</Text>
+            </View>
+          </View>
+
+          {/* Current Status Box */}
+          <View style={styles.currentStepBox}>
+            <Text style={styles.stepCounter}>Step {activeEmergency.statusIndex + 1} of 7</Text>
+            <Text style={styles.stepName}>{STATUS_LABELS[currentStatus]}</Text>
+          </View>
+
+          {/* ================================================================ */}
+          {/* 1. PATIENT CONTACT & VITALS CARD                                */}
+          {/* ================================================================ */}
+          <View style={styles.partyBox}>
+            <View style={styles.partyHeader}>
+              <User size={16} color={theme.colors.primary} />
+              <Text style={styles.partyTitle}>PATIENT DETAILS</Text>
+            </View>
+            <View style={styles.partyRow}>
+              <Text style={styles.partyLabel}>Name:</Text>
+              <Text style={styles.partyValue}>{activeEmergency.patientName}</Text>
+            </View>
+            <View style={styles.partyRow}>
+              <Text style={styles.partyLabel}>Phone:</Text>
+              <Text style={styles.partyValue}>{activeEmergency.patientPhone}</Text>
+            </View>
+            <View style={styles.partyRow}>
+              <Text style={styles.partyLabel}>Blood Group:</Text>
+              <Text style={[styles.partyValue, { color: theme.colors.primary }]}>{activeEmergency.patientBlood}</Text>
+            </View>
+            <View style={styles.partyRow}>
+              <Text style={styles.partyLabel}>Medical Notes:</Text>
+              <Text style={styles.partyValue}>{activeEmergency.patientNotes}</Text>
+            </View>
+
+            {/* Direct Dialer Button to Patient */}
+            <TouchableOpacity 
+              style={styles.directCallBtn}
+              onPress={() => mapNavigationService.makePhoneCall(activeEmergency.patientPhone, activeEmergency.patientName)}
+            >
+              <Phone size={15} color="#FFFFFF" style={{ marginRight: 6 }} />
+              <Text style={styles.directCallBtnText}>Call Patient ({activeEmergency.patientPhone})</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* ================================================================ */}
+          {/* 2. EMERGENCY CONTACT CARD (With Direct Phone Dialer)             */}
+          {/* ================================================================ */}
+          <View style={[styles.partyBox, { borderColor: '#BAE6FD', backgroundColor: '#F0F9FF' }]}>
+            <View style={styles.partyHeader}>
+              <Users size={16} color="#0284C7" />
+              <Text style={[styles.partyTitle, { color: '#0369A1' }]}>EMERGENCY CONTACT (FAMILY)</Text>
+            </View>
+            <View style={styles.partyRow}>
+              <Text style={styles.partyLabel}>Contact Name:</Text>
+              <Text style={styles.partyValue}>{activeEmergency.contactName}</Text>
+            </View>
+            <View style={styles.partyRow}>
+              <Text style={styles.partyLabel}>Contact Mobile:</Text>
+              <Text style={styles.partyValue}>{activeEmergency.contactPhone}</Text>
+            </View>
+            <Text style={styles.partyNotice}>
+              Family contact is authorized to track your live GPS route and arrival ETA.
+            </Text>
+
+            {/* Direct Dialer & SMS Buttons to Emergency Contact */}
+            <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
+              <TouchableOpacity 
+                style={[styles.directCallBtn, { flex: 2, backgroundColor: '#0284C7' }]}
+                onPress={() => mapNavigationService.makePhoneCall(activeEmergency.contactPhone, activeEmergency.contactName)}
+              >
+                <Phone size={15} color="#FFFFFF" style={{ marginRight: 6 }} />
+                <Text style={styles.directCallBtnText}>Call Contact ({activeEmergency.contactPhone})</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity 
+                style={styles.directSmsBtn}
+                onPress={() => mapNavigationService.sendSms(
+                  activeEmergency.contactPhone,
+                  `MediConnect Paramedic Crew: We are en route to ${activeEmergency.patientName} at 54 km/h. ETA 4 mins.`
+                )}
+              >
+                <MessageSquare size={15} color="#0284C7" style={{ marginRight: 4 }} />
+                <Text style={styles.directSmsBtnText}>SMS</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+
+          {/* ================================================================ */}
+          {/* 3. GOOGLE MAPS NAVIGATION VIEW & ONE-TAP ROUTING                */}
+          {/* ================================================================ */}
+          <View style={styles.mapContainer}>
+            <Image 
+              source={{ uri: googleMapStaticUrl }} 
+              style={styles.mapImage}
+              resizeMode="cover"
+            />
+            {/* Map Legend */}
+            <View style={styles.mapLegend}>
+              <View style={styles.legendItem}>
+                <View style={[styles.legendDot, { backgroundColor: '#DC2626' }]} />
+                <Text style={styles.legendText}>Patient (P)</Text>
+              </View>
+              <View style={styles.legendItem}>
+                <View style={[styles.legendDot, { backgroundColor: '#16A34A' }]} />
+                <Text style={styles.legendText}>Ambulance (A)</Text>
+              </View>
+              <View style={styles.legendItem}>
+                <View style={[styles.legendDot, { backgroundColor: '#0284C7' }]} />
+                <Text style={styles.legendText}>Hospital (H)</Text>
+              </View>
+            </View>
+          </View>
+
+          {/* Direct Google Maps Turn-by-Turn GPS Navigation Buttons */}
+          <View style={styles.navRow}>
+            <TouchableOpacity 
+              style={styles.navPatientBtn}
+              onPress={() => mapNavigationService.openNavigation(activeEmergency.patientLat, activeEmergency.patientLng, 'Patient Location')}
+            >
+              <Navigation size={16} color="#FFFFFF" style={{ marginRight: 6 }} />
+              <Text style={styles.navPatientBtnText}>Turn-by-Turn Navigation to Patient</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity 
+              style={styles.navHospitalBtn}
+              onPress={() => mapNavigationService.openNavigation(activeEmergency.hospitalLat, activeEmergency.hospitalLng, activeEmergency.hospitalName)}
+            >
+              <ExternalLink size={16} color="#FFFFFF" style={{ marginRight: 6 }} />
+              <Text style={styles.navHospitalBtnText}>Route to Trauma Hospital</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Advance Step Action Button */}
+          <TouchableOpacity style={styles.advanceButton} onPress={handleNextStatus}>
+            <Check size={18} color="#FFFFFF" style={{ marginRight: 6 }} />
+            <Text style={styles.advanceButtonText}>
+              {activeEmergency.statusIndex === 6 ? 'Mark as Resolved' : 'Advance to Next Status'}
+            </Text>
+          </TouchableOpacity>
+
+          {/* Hospital Selection Sub-Screen Launcher */}
+          <View style={{ flexDirection: 'row', gap: 8, marginBottom: theme.spacing.sm }}>
+            <TouchableOpacity 
+              style={[styles.advanceButton, { flex: 1, backgroundColor: '#0284C7' }]} 
+              onPress={onOpenHospitalPicker}
+            >
+              <Hospital size={16} color="#FFFFFF" style={{ marginRight: 4 }} />
+              <Text style={[styles.advanceButtonText, { fontSize: 12 }]}>Change Hospital</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity 
+              style={[styles.advanceButton, { flex: 1, backgroundColor: '#0F172A' }]} 
+              onPress={onOpenLiveTracking}
+            >
+              <Navigation size={16} color="#FFFFFF" style={{ marginRight: 4 }} />
+              <Text style={[styles.advanceButtonText, { fontSize: 12 }]}>Live Nav Stream</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Cancel & Reassign Button */}
+          <TouchableOpacity 
+            style={styles.cancelAssignButton} 
+            onPress={() => setCancelModalVisible(true)}
+          >
+            <Text style={styles.cancelAssignText}>Cancel Assignment (Reassign)</Text>
+          </TouchableOpacity>
+        </View>
+      ) : incomingOffer && availability === 'ONLINE' ? (
+        /* Incoming SOS Offer Card with 60s Countdown */
+        <View style={styles.offerCard}>
+          <View style={styles.offerHeader}>
+            <AlertCircle size={26} color={theme.colors.primary} />
+            <View style={{ flex: 1, marginLeft: theme.spacing.sm }}>
+              <Text style={styles.offerTitle}>NEW SOS DISPATCH OFFER</Text>
+              <Text style={styles.offerDistance}>{incomingOffer.distance}</Text>
+            </View>
+            <View style={styles.countdownBox}>
+              <Text style={styles.countdownText}>{countdown}s</Text>
+            </View>
+          </View>
+
+          <Text style={styles.offerLocation}>📍 {incomingOffer.patientLocation}</Text>
+          
+          <View style={styles.offerPreviewBox}>
+            <Text style={styles.offerPreviewText}>
+              Patient: <Text style={{ fontWeight: '700' }}>{incomingOffer.patientName}</Text> • Contact: <Text style={{ fontWeight: '700' }}>{incomingOffer.contactName}</Text>
+            </Text>
+          </View>
+
+          <Text style={styles.offerNotice}>
+            Respond within 60s. Atomic allocation will assign to the nearest responding crew.
+          </Text>
+
+          <View style={styles.offerBtnGroup}>
+            <TouchableOpacity style={styles.rejectBtn} onPress={handleRejectEmergency}>
+              <Text style={styles.rejectBtnText}>Decline</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.acceptBtn} onPress={handleAcceptEmergency}>
+              <Text style={styles.acceptBtnText}>Accept Dispatch</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      ) : (
+        <View style={styles.idleCard}>
+          <Text style={styles.idleTitle}>
+            {availability === 'ONLINE' ? 'Awaiting Emergency Dispatch' : 'You are currently Offline'}
+          </Text>
+          <Text style={styles.idleSubtitle}>
+            {availability === 'ONLINE' 
+              ? 'GPS satellite broadcasting is active. You will receive real-time 60s dispatch alerts with Google Maps routes for emergencies within your 5 km sector.'
+              : 'Toggle Online above to begin receiving emergency dispatch alerts.'}
+          </Text>
+        </View>
+      )}
+
+      {/* Cancellation Reason Modal */}
+      <Modal visible={cancelModalVisible} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Select Cancellation Reason</Text>
+            <Text style={styles.modalSubtitle}>
+              A mandatory reason must be recorded before reassignment begins.
+            </Text>
+
+            {CANCELLATION_REASONS.map(reason => (
+              <TouchableOpacity
+                key={reason}
+                style={styles.reasonOption}
+                onPress={() => handleConfirmCancel(reason)}
+              >
+                <Text style={styles.reasonText}>{reason}</Text>
+              </TouchableOpacity>
+            ))}
+
+            <TouchableOpacity 
+              style={styles.modalCloseBtn}
+              onPress={() => setCancelModalVisible(false)}
+            >
+              <Text style={styles.modalCloseText}>Keep Assignment</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+    </ScrollView>
+  );
+};
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: theme.colors.background
+  },
+  content: {
+    padding: theme.spacing.lg,
+    paddingTop: theme.spacing.xl * 1.2,
+    paddingBottom: 40
+  },
+  header: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: theme.spacing.md
+  },
+  greeting: {
+    fontSize: 22,
+    fontWeight: '800',
+    color: theme.colors.textPrimary
+  },
+  roleTag: {
+    fontSize: 13,
+    color: theme.colors.textSecondary,
+    fontWeight: '500',
+    marginTop: 2
+  },
+  switchButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: theme.colors.accentLight,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: theme.borderRadius.full,
+    gap: 4
+  },
+  switchButtonText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: theme.colors.accent
+  },
+  statusCard: {
+    backgroundColor: theme.colors.surface,
+    padding: theme.spacing.md,
+    borderRadius: theme.borderRadius.md,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    marginBottom: theme.spacing.md
+  },
+  statusRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center'
+  },
+  approvalText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: theme.colors.textPrimary
+  },
+  powerButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: theme.borderRadius.full
+  },
+  powerOnline: {
+    backgroundColor: theme.colors.success
+  },
+  powerOffline: {
+    backgroundColor: theme.colors.textMuted
+  },
+  powerButtonText: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 12
+  },
+
+  // Active Job Styles
+  activeJobCard: {
+    backgroundColor: theme.colors.surface,
+    borderRadius: theme.borderRadius.lg,
+    padding: theme.spacing.md,
+    borderWidth: 2,
+    borderColor: '#0284C7',
+    marginBottom: theme.spacing.md,
+    elevation: 3
+  },
+  jobHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: theme.spacing.sm
+  },
+  jobTitle: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#0284C7',
+    letterSpacing: 0.5
+  },
+  jobSubtitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: theme.colors.textPrimary
+  },
+  currentStepBox: {
+    backgroundColor: '#F0F9FF',
+    padding: theme.spacing.sm,
+    borderRadius: theme.borderRadius.sm,
+    marginBottom: theme.spacing.md,
+    borderWidth: 1,
+    borderColor: '#BAE6FD'
+  },
+  stepCounter: {
+    fontSize: 11,
+    color: '#0284C7',
+    fontWeight: '700',
+    textTransform: 'uppercase'
+  },
+  stepName: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#0369A1',
+    marginTop: 2
+  },
+
+  // Party (Patient & Contact) Cards
+  partyBox: {
+    backgroundColor: '#FEF2F2',
+    borderWidth: 1,
+    borderColor: '#FEE2E2',
+    borderRadius: theme.borderRadius.md,
+    padding: theme.spacing.sm,
+    marginBottom: theme.spacing.sm
+  },
+  partyHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 6,
+    paddingBottom: 4,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(0,0,0,0.05)'
+  },
+  partyTitle: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: theme.colors.primary,
+    letterSpacing: 0.5
+  },
+  partyRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingVertical: 2
+  },
+  partyLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: theme.colors.textSecondary
+  },
+  partyValue: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: theme.colors.textPrimary
+  },
+  partyNotice: {
+    fontSize: 11,
+    color: '#0369A1',
+    marginTop: 4,
+    fontStyle: 'italic'
+  },
+  directCallBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#15803D',
+    paddingVertical: 10,
+    borderRadius: theme.borderRadius.sm,
+    marginTop: 8
+  },
+  directCallBtnText: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 12
+  },
+  directSmsBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#E0F2FE',
+    borderWidth: 1,
+    borderColor: '#BAE6FD',
+    paddingVertical: 10,
+    borderRadius: theme.borderRadius.sm,
+    marginTop: 8
+  },
+  directSmsBtnText: {
+    color: '#0369A1',
+    fontWeight: '700',
+    fontSize: 12
+  },
+
+  // Map & Navigation
+  mapContainer: {
+    borderRadius: theme.borderRadius.md,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    marginBottom: theme.spacing.sm,
+    backgroundColor: '#E2E8F0',
+    position: 'relative'
+  },
+  mapImage: {
+    width: '100%',
+    height: 180
+  },
+  mapLegend: {
+    position: 'absolute',
+    bottom: 8,
+    left: 8,
+    right: 8,
+    backgroundColor: 'rgba(255, 255, 255, 0.92)',
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    paddingVertical: 5,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#CBD5E1'
+  },
+  legendItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4
+  },
+  legendDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4
+  },
+  legendText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#334155'
+  },
+  navRow: {
+    gap: 8,
+    marginBottom: theme.spacing.md
+  },
+  navPatientBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#1E40AF',
+    paddingVertical: 12,
+    borderRadius: theme.borderRadius.md,
+    elevation: 2
+  },
+  navPatientBtnText: {
+    color: '#FFFFFF',
+    fontWeight: '800',
+    fontSize: 13
+  },
+  navHospitalBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#0369A1',
+    paddingVertical: 10,
+    borderRadius: theme.borderRadius.md
+  },
+  navHospitalBtnText: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 12
+  },
+
+  advanceButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: theme.colors.primary,
+    paddingVertical: 12,
+    borderRadius: theme.borderRadius.md,
+    marginBottom: theme.spacing.sm
+  },
+  advanceButtonText: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 14
+  },
+  cancelAssignButton: {
+    alignItems: 'center',
+    paddingVertical: 8
+  },
+  cancelAssignText: {
+    color: theme.colors.textMuted,
+    fontSize: 12,
+    textDecorationLine: 'underline'
+  },
+
+  // Offer Styles
+  offerCard: {
+    backgroundColor: theme.colors.surface,
+    borderRadius: theme.borderRadius.lg,
+    padding: theme.spacing.md,
+    borderWidth: 2,
+    borderColor: theme.colors.primary,
+    marginBottom: theme.spacing.md,
+    elevation: 4
+  },
+  offerHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: theme.spacing.sm
+  },
+  offerTitle: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: theme.colors.primary,
+    letterSpacing: 0.5
+  },
+  offerDistance: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: theme.colors.textPrimary
+  },
+  countdownBox: {
+    backgroundColor: '#FEE2E2',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: theme.borderRadius.full,
+    borderWidth: 1,
+    borderColor: '#F87171'
+  },
+  countdownText: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#991B1B'
+  },
+  offerLocation: {
+    fontSize: 13,
+    color: theme.colors.textPrimary,
+    fontWeight: '600',
+    marginBottom: 6
+  },
+  offerPreviewBox: {
+    backgroundColor: '#F8FAFC',
+    padding: 8,
+    borderRadius: 6,
+    marginBottom: 8
+  },
+  offerPreviewText: {
+    fontSize: 12,
+    color: theme.colors.textSecondary
+  },
+  offerNotice: {
+    fontSize: 11,
+    color: theme.colors.textMuted,
+    marginBottom: theme.spacing.md
+  },
+  offerBtnGroup: {
+    flexDirection: 'row',
+    gap: 12
+  },
+  rejectBtn: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: theme.colors.background,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    paddingVertical: 12,
+    borderRadius: theme.borderRadius.md
+  },
+  rejectBtnText: {
+    color: theme.colors.textSecondary,
+    fontWeight: '600',
+    fontSize: 13
+  },
+  acceptBtn: {
+    flex: 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#16A34A',
+    paddingVertical: 12,
+    borderRadius: theme.borderRadius.md
+  },
+  acceptBtnText: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 14
+  },
+  idleCard: {
+    backgroundColor: theme.colors.surface,
+    padding: theme.spacing.xl,
+    borderRadius: theme.borderRadius.lg,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: theme.colors.border
+  },
+  idleTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: theme.colors.textPrimary,
+    marginBottom: 4
+  },
+  idleSubtitle: {
+    fontSize: 13,
+    color: theme.colors.textSecondary,
+    textAlign: 'center',
+    lineHeight: 19
+  },
+
+  // Modal Styles
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'flex-end'
+  },
+  modalContent: {
+    backgroundColor: theme.colors.surface,
+    borderTopLeftRadius: theme.borderRadius.lg,
+    borderTopRightRadius: theme.borderRadius.lg,
+    padding: theme.spacing.lg
+  },
+  modalTitle: {
+    fontSize: 17,
+    fontWeight: '800',
+    color: theme.colors.textPrimary,
+    marginBottom: 4
+  },
+  modalSubtitle: {
+    fontSize: 12,
+    color: theme.colors.textSecondary,
+    marginBottom: theme.spacing.md
+  },
+  reasonOption: {
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: theme.colors.border
+  },
+  reasonText: {
+    fontSize: 14,
+    color: theme.colors.textPrimary,
+    fontWeight: '500'
+  },
+  modalCloseBtn: {
+    marginTop: theme.spacing.md,
+    alignItems: 'center',
+    paddingVertical: 12,
+    backgroundColor: theme.colors.background,
+    borderRadius: theme.borderRadius.md
+  },
+  modalCloseText: {
+    fontSize: 13,
+    color: theme.colors.textSecondary,
+    fontWeight: '600'
+  }
+});

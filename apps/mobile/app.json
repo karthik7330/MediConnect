@@ -1,0 +1,55 @@
+{
+  "expo": {
+    "name": "MediConnect",
+    "slug": "mediconnect",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#E53935"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.mediconnect.app",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "MediConnect requires access to your location to dispatch ambulances during an emergency and share your live telemetry with authorized contacts.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "MediConnect tracks real-time location to ensure emergency responders navigate directly to you."
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#E53935"
+      },
+      "package": "com.mediconnect.app",
+      "permissions": [
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
+        "INTERNET",
+        "VIBRATE",
+        "POST_NOTIFICATIONS",
+        "WAKE_LOCK"
+      ]
+    },
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "MediConnect tracks your location to dispatch ambulances to your exact position."
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/icon.png",
+          "color": "#E53935"
+        }
+      ]
+    ]
+  }
+}

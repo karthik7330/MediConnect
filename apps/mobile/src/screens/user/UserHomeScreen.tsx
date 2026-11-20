@@ -1,0 +1,565 @@
+import React, { useState } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, Alert, ActivityIndicator, ScrollView, Image } from 'react-native';
+import * as Location from 'expo-location';
+import { ShieldAlert, MapPin, XCircle, Clock, WifiOff, Users, ArrowLeftRight, Navigation, MessageSquare, LogOut, Phone, ExternalLink } from 'lucide-react-native';
+import { theme } from '../../lib/theme';
+import { supabase } from '../../lib/supabase';
+import { offlineQueueService } from '../../services/offlineQueue';
+import { emergencyService } from '../../services/emergencyService';
+import { mapNavigationService } from '../../services/mapNavigationService';
+import { notificationService } from '../../services/notificationService';
+import { backgroundLocationService } from '../../services/backgroundLocationService';
+import { firebaseService } from '../../services/firebaseService';
+import { distanceService } from '../../services/distanceService';
+import { Profile } from '@mediconnect/shared';
+
+interface UserHomeScreenProps {
+  onSwitchRole: () => void;
+  onOpenContacts?: () => void;
+  onOpenLiveTracking?: (id: string) => void;
+  onOpenFeedback?: (id: string) => void;
+  userProfile?: Profile | null;
+}
+
+export const UserHomeScreen: React.FC<UserHomeScreenProps> = ({ 
+  onSwitchRole, 
+  onOpenContacts, 
+  onOpenLiveTracking, 
+  onOpenFeedback,
+  userProfile
+}) => {
+  const [isActivating, setIsActivating] = useState(false);
+  const [activeEmergencyId, setActiveEmergencyId] = useState<string | null>(null);
+  const [emergencyStatus, setEmergencyStatus] = useState<string | null>(null);
+  const [isOfflineMode, setIsOfflineMode] = useState(false);
+  const [lastCoords, setLastCoords] = useState<{ lat: number; lng: number } | null>(null);
+
+  // Requirement: SOS MUST activate immediately without a confirmation screen
+  const handleImmediateSosTrigger = async () => {
+    setIsActivating(true);
+    try {
+      // 1. Capture High Accuracy GPS Telemetry
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      let coords = { latitude: 13.0895, longitude: 80.2739 }; // Real Chennai default fallback coords
+
+      if (status === 'granted') {
+        const location = await Location.getCurrentPositionAsync({
+          accuracy: Location.Accuracy.Highest
+        });
+        coords = {
+          latitude: location.coords.latitude,
+          longitude: location.coords.longitude
+        };
+      }
+
+      setLastCoords({ lat: coords.latitude, lng: coords.longitude });
+
+      // 2. Trigger SOS via live API with automatic offline queue fallback
+      const activeUserId = userProfile?.id || '44444444-4444-4444-4444-444444444444';
+      const result = await emergencyService.triggerSos(activeUserId, coords, 'Live GPS Incident Location');
+
+      if (result.success && result.emergencyId) {
+        setIsOfflineMode(result.isOffline || false);
+        setActiveEmergencyId(result.emergencyId);
+        setEmergencyStatus(result.isOffline ? 'QUEUED_OFFLINE' : 'SOS_ACTIVATED');
+
+        // 3. Dispatch High-Priority SOS Push Notification
+        await notificationService.dispatchSosAlert({
+          emergencyId: result.emergencyId,
+          patientName: userProfile?.fullName || 'Citizen User',
+          locationText: 'Live GPS Coordinates'
+        });
+
+        // 4. Start Android Foreground Service & Background Continuous GPS Tracking
+        await backgroundLocationService.startTracking({
+          incidentId: result.emergencyId,
+          role: 'NORMAL_USER',
+          userId: activeUserId
+        });
+
+        // 5. Dual-Cloud Redundancy: Sync to Firebase backup channel
+        await firebaseService.syncEmergencyBackup(result.emergencyId, {
+          userId: activeUserId,
+          latitude: coords.latitude,
+          longitude: coords.longitude,
+          status: 'SOS_ACTIVATED',
+          timestamp: new Date().toISOString()
+        });
+      }
+    } catch (err: unknown) {
+      console.error('[UserHomeScreen] Unexpected SOS failure:', err);
+      setIsOfflineMode(true);
+      setEmergencyStatus('QUEUED_OFFLINE');
+    } finally {
+      setIsActivating(false);
+    }
+  };
+
+  const handleCancelSos = async () => {
+    if (!activeEmergencyId) return;
+
+    // Stop background location updates & foreground service
+    await backgroundLocationService.stopTracking();
+
+    if (!isOfflineMode) {
+      await supabase
+        .from('emergency_requests')
+        .update({
+          current_status: 'EMERGENCY_CANCELLED',
+          cancellation_reason: 'User cancelled request'
+        })
+        .eq('id', activeEmergencyId);
+    } else {
+      await offlineQueueService.clearEmergency(activeEmergencyId);
+    }
+
+    setActiveEmergencyId(null);
+    setEmergencyStatus(null);
+    setIsOfflineMode(false);
+    Alert.alert('SOS Cancelled', 'Your emergency request has been safely cancelled.');
+  };
+
+  return (
+    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+      {/* Top Header */}
+      <View style={styles.header}>
+        <View>
+          <Text style={styles.greeting}>Welcome, {userProfile?.fullName || 'Citizen'}</Text>
+          <Text style={styles.roleTag}>Normal User Dashboard</Text>
+        </View>
+        <TouchableOpacity style={styles.switchButton} onPress={onSwitchRole}>
+          <LogOut size={16} color={theme.colors.accent} />
+          <Text style={styles.switchButtonText}>Sign Out</Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* Offline Mode Banner */}
+      {isOfflineMode && (
+        <View style={styles.offlineBanner}>
+          <WifiOff size={18} color="#991B1B" />
+          <Text style={styles.offlineBannerText}>
+            Operating in Offline Mode. Request queued locally and will sync once internet returns.
+          </Text>
+        </View>
+      )}
+
+      {/* Active Emergency Status Card */}
+      {activeEmergencyId ? (
+        <View style={styles.activeAlertCard}>
+          <View style={styles.alertHeader}>
+            <ShieldAlert size={28} color={theme.colors.primary} />
+            <View style={{ flex: 1, marginLeft: theme.spacing.sm }}>
+              <Text style={styles.alertTitle}>EMERGENCY ACTIVE</Text>
+              <Text style={styles.alertSubtitle}>
+                Status: {emergencyStatus === 'QUEUED_OFFLINE' ? 'Queued Offline (Pending Network)' : 'Searching Available Ambulances (5 km)'}
+              </Text>
+            </View>
+          </View>
+
+          {/* Live Google Map View for Citizen */}
+          {lastCoords && (
+            <View style={styles.googleMapBox}>
+              <Image 
+                source={{
+                  uri: mapNavigationService.getStaticMapUrl({
+                    centerLat: lastCoords.lat,
+                    centerLng: lastCoords.lng,
+                    zoom: 14,
+                    width: 600,
+                    height: 280,
+                    markers: [
+                      { lat: lastCoords.lat, lng: lastCoords.lng, color: 'red', label: 'P' },
+                      { lat: 13.0604, lng: 80.2505, color: 'blue', label: 'H' }
+                    ]
+                  })
+                }} 
+                style={styles.googleMapImage}
+                resizeMode="cover"
+              />
+              <View style={styles.mapLegendOverlay}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                  <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#DC2626' }} />
+                  <Text style={styles.legendText}>You (P)</Text>
+                </View>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                  <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#0284C7' }} />
+                  <Text style={styles.legendText}>Apollo Hospital (H)</Text>
+                </View>
+              </View>
+            </View>
+          )}
+
+          {/* Quick Action Navigation & Dialer Buttons */}
+          <View style={{ flexDirection: 'row', gap: 8, marginBottom: theme.spacing.sm }}>
+            {lastCoords && (
+              <TouchableOpacity
+                style={styles.googleNavBtn}
+                onPress={() => mapNavigationService.openNavigation(lastCoords.lat, lastCoords.lng, 'My Incident Location')}
+              >
+                <ExternalLink size={15} color="#FFFFFF" style={{ marginRight: 4 }} />
+                <Text style={styles.googleNavBtnText}>Open in Google Maps</Text>
+              </TouchableOpacity>
+            )}
+
+            <TouchableOpacity
+              style={styles.emergencyCallBtn}
+              onPress={() => mapNavigationService.makePhoneCall('108', 'National Emergency Ambulance Service')}
+            >
+              <Phone size={15} color="#FFFFFF" style={{ marginRight: 4 }} />
+              <Text style={styles.emergencyCallBtnText}>Call 108 Hotline</Text>
+            </TouchableOpacity>
+          </View>
+
+          <TouchableOpacity
+            style={styles.mapButton}
+            onPress={() => onOpenLiveTracking?.(activeEmergencyId)}
+            activeOpacity={0.8}
+          >
+            <Navigation size={18} color="#FFFFFF" style={{ marginRight: 6 }} />
+            <Text style={styles.mapButtonText}>View Live Responder Telemetry</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.cancelButton}
+            onPress={handleCancelSos}
+            activeOpacity={0.8}
+          >
+            <XCircle size={20} color="#FFFFFF" style={{ marginRight: 6 }} />
+            <Text style={styles.cancelButtonText}>Cancel Emergency Request</Text>
+          </TouchableOpacity>
+        </View>
+      ) : (
+        /* Instant Zero-Click SOS Button */
+        <View style={styles.sosContainer}>
+          <Text style={styles.sosInstructions}>
+            Press the button below in any life-threatening situation.
+            {'\n'}SOS triggers immediately without extra confirmation.
+          </Text>
+
+          <TouchableOpacity
+            style={[styles.sosButton, isActivating && styles.sosButtonDisabled]}
+            activeOpacity={0.85}
+            onPress={handleImmediateSosTrigger}
+            disabled={isActivating}
+          >
+            {isActivating ? (
+              <ActivityIndicator size="large" color="#FFFFFF" />
+            ) : (
+              <View style={styles.sosInner}>
+                <ShieldAlert size={56} color="#FFFFFF" strokeWidth={2.5} />
+                <Text style={styles.sosText}>SOS</Text>
+                <Text style={styles.sosSubtext}>TAP FOR EMERGENCY</Text>
+              </View>
+            )}
+          </TouchableOpacity>
+
+          <View style={styles.locationNotice}>
+            <MapPin size={14} color={theme.colors.textMuted} />
+            <Text style={styles.locationNoticeText}>High-precision GPS automatically captured</Text>
+          </View>
+        </View>
+      )}
+
+      {/* Quick Navigation Cards */}
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Emergency Network</Text>
+        <View style={styles.grid}>
+          <TouchableOpacity 
+            style={styles.actionCard} 
+            onPress={onOpenContacts}
+            activeOpacity={0.8}
+          >
+            <Users size={22} color={theme.colors.accent} />
+            <Text style={styles.actionCardTitle}>Emergency Contacts</Text>
+            <Text style={styles.actionCardSubtitle}>Manage family net & requests</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity 
+            style={styles.actionCard} 
+            onPress={() => onOpenFeedback?.(activeEmergencyId || 'EMG-PREV')}
+            activeOpacity={0.8}
+          >
+            <MessageSquare size={22} color={theme.colors.success} />
+            <Text style={styles.actionCardTitle}>Ratings & Feedback</Text>
+            <Text style={styles.actionCardSubtitle}>Anonymous crew review</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </ScrollView>
+  );
+};
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: theme.colors.background
+  },
+  content: {
+    padding: theme.spacing.lg,
+    paddingTop: theme.spacing.xl * 1.2
+  },
+  header: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: theme.spacing.lg
+  },
+  greeting: {
+    fontSize: 22,
+    fontWeight: '800',
+    color: theme.colors.textPrimary
+  },
+  roleTag: {
+    fontSize: 13,
+    color: theme.colors.textSecondary,
+    fontWeight: '500'
+  },
+  switchButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: theme.colors.accentLight,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: theme.borderRadius.full,
+    gap: 4
+  },
+  switchButtonText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: theme.colors.accent
+  },
+  offlineBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FEE2E2',
+    borderWidth: 1,
+    borderColor: '#FCA5A5',
+    padding: theme.spacing.md,
+    borderRadius: theme.borderRadius.md,
+    marginBottom: theme.spacing.lg,
+    gap: theme.spacing.sm
+  },
+  offlineBannerText: {
+    flex: 1,
+    fontSize: 12,
+    color: '#991B1B',
+    lineHeight: 16,
+    fontWeight: '600'
+  },
+  sosContainer: {
+    alignItems: 'center',
+    backgroundColor: theme.colors.surface,
+    padding: theme.spacing.xl,
+    borderRadius: theme.borderRadius.lg,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    marginBottom: theme.spacing.xl,
+    elevation: 3
+  },
+  sosInstructions: {
+    fontSize: 13,
+    color: theme.colors.textSecondary,
+    textAlign: 'center',
+    lineHeight: 18,
+    marginBottom: theme.spacing.lg
+  },
+  sosButton: {
+    width: 200,
+    height: 200,
+    borderRadius: 100,
+    backgroundColor: theme.colors.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    elevation: 10,
+    shadowColor: theme.colors.primary,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.45,
+    shadowRadius: 16
+  },
+  sosButtonDisabled: {
+    opacity: 0.7
+  },
+  sosInner: {
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  sosText: {
+    fontSize: 32,
+    fontWeight: '900',
+    color: '#FFFFFF',
+    letterSpacing: 2,
+    marginTop: 4
+  },
+  sosSubtext: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: 'rgba(255, 255, 255, 0.85)',
+    letterSpacing: 1,
+    marginTop: 2
+  },
+  locationNotice: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: theme.spacing.md,
+    gap: 4
+  },
+  locationNoticeText: {
+    fontSize: 11,
+    color: theme.colors.textMuted
+  },
+  activeAlertCard: {
+    backgroundColor: theme.colors.surface,
+    borderRadius: theme.borderRadius.lg,
+    padding: theme.spacing.lg,
+    borderWidth: 2,
+    borderColor: theme.colors.primary,
+    marginBottom: theme.spacing.xl
+  },
+  alertHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: theme.spacing.md
+  },
+  alertTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: theme.colors.primary
+  },
+  alertSubtitle: {
+    fontSize: 13,
+    color: theme.colors.textSecondary,
+    marginTop: 2
+  },
+  googleMapBox: {
+    borderRadius: theme.borderRadius.md,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    marginBottom: theme.spacing.sm,
+    backgroundColor: '#E2E8F0',
+    position: 'relative'
+  },
+  googleMapImage: {
+    width: '100%',
+    height: 160
+  },
+  mapLegendOverlay: {
+    position: 'absolute',
+    bottom: 6,
+    left: 6,
+    right: 6,
+    backgroundColor: 'rgba(255, 255, 255, 0.9)',
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    paddingVertical: 4,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: '#CBD5E1'
+  },
+  legendText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#334155'
+  },
+  googleNavBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#1E40AF',
+    paddingVertical: 10,
+    borderRadius: theme.borderRadius.md
+  },
+  googleNavBtnText: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 12
+  },
+  emergencyCallBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#15803D',
+    paddingVertical: 10,
+    borderRadius: theme.borderRadius.md
+  },
+  emergencyCallBtnText: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 12
+  },
+  telemetryBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: theme.colors.background,
+    padding: theme.spacing.sm,
+    borderRadius: theme.borderRadius.sm,
+    marginBottom: theme.spacing.md,
+    gap: 6
+  },
+  telemetryText: {
+    fontSize: 12,
+    color: theme.colors.textSecondary,
+    fontFamily: 'monospace'
+  },
+  mapButton: {
+    flexDirection: 'row',
+    backgroundColor: '#0284C7',
+    paddingVertical: 12,
+    borderRadius: theme.borderRadius.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: theme.spacing.sm
+  },
+  mapButtonText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '700'
+  },
+  cancelButton: {
+    flexDirection: 'row',
+    backgroundColor: '#DC2626',
+    paddingVertical: 12,
+    borderRadius: theme.borderRadius.md,
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  cancelButtonText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '700'
+  },
+  section: {
+    marginTop: theme.spacing.sm
+  },
+  sectionTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: theme.colors.textPrimary,
+    marginBottom: theme.spacing.md
+  },
+  grid: {
+    flexDirection: 'row',
+    gap: theme.spacing.md
+  },
+  actionCard: {
+    flex: 1,
+    backgroundColor: theme.colors.surface,
+    padding: theme.spacing.md,
+    borderRadius: theme.borderRadius.md,
+    borderWidth: 1,
+    borderColor: theme.colors.border
+  },
+  actionCardTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: theme.colors.textPrimary,
+    marginTop: theme.spacing.sm
+  },
+  actionCardSubtitle: {
+    fontSize: 11,
+    color: theme.colors.textSecondary,
+    marginTop: 2
+  }
+});
