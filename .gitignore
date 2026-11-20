@@ -4,6 +4,7 @@ node_modules/
 dist/
 out/
 build/
+*.tsbuildinfo
 scripts/
 *.log
 .DS_Store
