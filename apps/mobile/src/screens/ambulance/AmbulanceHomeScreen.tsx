@@ -23,6 +23,8 @@ import { mapNavigationService } from '../../services/mapNavigationService';
 import { notificationService } from '../../services/notificationService';
 import { backgroundLocationService } from '../../services/backgroundLocationService';
 import { distanceService } from '../../services/distanceService';
+import { supabase } from '../../lib/supabase';
+import * as Location from 'expo-location';
 
 interface AmbulanceHomeScreenProps {
   onSwitchRole: () => void;
@@ -40,24 +42,26 @@ export const AmbulanceHomeScreen: React.FC<AmbulanceHomeScreenProps> = ({
   const [availability, setAvailability] = useState<CrewAvailability>('ONLINE');
   const [isApproved] = useState(true); // Main admin approval state
 
-  // Simulated Incoming Dispatch Alert with 60s countdown
+  // Live Crew GPS Coordinates
+  const [crewLocation, setCrewLocation] = useState<{ latitude: number; longitude: number }>({
+    latitude: 13.0827,
+    longitude: 80.2707
+  });
+
+  // Real-time Incoming Dispatch Alert from Citizen SOS
   const [incomingOffer, setIncomingOffer] = useState<{
     id: string;
     distance: string;
     patientLocation: string;
     patientName: string;
     patientPhone: string;
+    patientBlood?: string;
+    patientNotes?: string;
     contactName: string;
     contactPhone: string;
-  } | null>({
-    id: 'emg-live-892',
-    distance: '2.1 km away',
-    patientLocation: '742 Market St, Near Greams Road Metro',
-    patientName: 'Karthik',
-    patientPhone: '+919876543210',
-    contactName: 'Priya (Emergency Contact)',
-    contactPhone: '+919876543212'
-  });
+    patientLat: number;
+    patientLng: number;
+  } | null>(null);
   const [countdown, setCountdown] = useState(60);
 
   // Active Emergency Assignment state with Patient & Emergency Contact details
@@ -81,6 +85,147 @@ export const AmbulanceHomeScreen: React.FC<AmbulanceHomeScreenProps> = ({
 
   // Cancellation Modal
   const [cancelModalVisible, setCancelModalVisible] = useState(false);
+
+  const crewId = userProfile?.id || '33333333-3333-3333-3333-333333333333';
+
+  // 1. Capture live paramedic GPS coordinates and update availability in database
+  useEffect(() => {
+    const syncCrewLocation = async () => {
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status === 'granted') {
+          const loc = await Location.getCurrentPositionAsync({
+            accuracy: Location.Accuracy.Balanced
+          });
+          const coords = { latitude: loc.coords.latitude, longitude: loc.coords.longitude };
+          setCrewLocation(coords);
+
+          await supabase.from('ambulance_crews').upsert({
+            id: crewId,
+            availability: availability,
+            is_approved: true,
+            location: `POINT(${coords.longitude} ${coords.latitude})`,
+            last_location_update: new Date().toISOString()
+          });
+        }
+      } catch (err) {
+        console.warn('[AmbulanceHomeScreen] Location sync warning:', err);
+      }
+    };
+
+    syncCrewLocation();
+  }, [crewId, availability]);
+
+  // 2. Real-time listening for incoming emergency requests from Citizen SOS
+  useEffect(() => {
+    if (availability !== 'ONLINE' || activeEmergency) return;
+
+    const processIncomingRequest = async (req: any) => {
+      if (!req || req.current_status !== 'SOS_ACTIVATED') return;
+      // Only process if assigned specifically to this crew or open for nearest allocation
+      if (req.assigned_ambulance_id && req.assigned_ambulance_id !== crewId) return;
+
+      const pCoords = distanceService.parsePoint(req.user_location) || { latitude: 13.0895, longitude: 80.2739 };
+
+      // Fetch citizen patient profile details
+      let patientName = 'Citizen Emergency';
+      let patientPhone = '+919876543210';
+      let patientBlood = 'O+';
+      let patientNotes = 'Immediate assistance requested';
+
+      if (req.user_id) {
+        const { data: pData } = await supabase
+          .from('profiles')
+          .select('full_name, phone_number, blood_group, medical_notes')
+          .eq('id', req.user_id)
+          .single();
+
+        if (pData) {
+          patientName = pData.full_name || patientName;
+          patientPhone = pData.phone_number || patientPhone;
+          patientBlood = pData.blood_group || patientBlood;
+          patientNotes = pData.medical_notes || patientNotes;
+        }
+      }
+
+      // Fetch patient's designated emergency contact
+      let contactName = 'Family Contact';
+      let contactPhone = '+919876543212';
+      if (req.user_id) {
+        const { data: cData } = await supabase
+          .from('emergency_contacts')
+          .select('contact_name, contact_user_id')
+          .eq('user_id', req.user_id)
+          .limit(1)
+          .maybeSingle();
+
+        if (cData) {
+          contactName = cData.contact_name || contactName;
+          if (cData.contact_user_id) {
+            const { data: cProfile } = await supabase
+              .from('profiles')
+              .select('phone_number')
+              .eq('id', cData.contact_user_id)
+              .single();
+            if (cProfile) contactPhone = cProfile.phone_number || contactPhone;
+          }
+        }
+      }
+
+      // Dynamic distance and ETA computation
+      const distKm = distanceService.calculateDistanceKm(crewLocation, pCoords);
+      const etaMins = distanceService.calculateEtaMinutes(distKm);
+
+      setIncomingOffer({
+        id: req.id,
+        distance: `${distanceService.formatDistance(distKm)} away (${distanceService.formatEta(etaMins)})`,
+        patientLocation: req.address_text || `GPS (${pCoords.latitude.toFixed(4)}, ${pCoords.longitude.toFixed(4)})`,
+        patientName,
+        patientPhone,
+        patientBlood,
+        patientNotes,
+        contactName,
+        contactPhone,
+        patientLat: pCoords.latitude,
+        patientLng: pCoords.longitude
+      });
+      setCountdown(60);
+    };
+
+    // Query for any existing unhandled emergency request matching this crew
+    const checkExisting = async () => {
+      const { data } = await supabase
+        .from('emergency_requests')
+        .select('*')
+        .eq('current_status', 'SOS_ACTIVATED')
+        .or(`assigned_ambulance_id.eq.${crewId},assigned_ambulance_id.is.null`)
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      if (data && data.length > 0) {
+        processIncomingRequest(data[0]);
+      }
+    };
+    checkExisting();
+
+    // Supabase Realtime channel subscription
+    const channel = supabase
+      .channel(`crew_emergencies_${crewId}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'emergency_requests' },
+        (payload) => {
+          if (payload.new) {
+            processIncomingRequest(payload.new);
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [availability, activeEmergency, crewLocation, crewId]);
 
   // 60-second countdown timer for offered SOS request
   useEffect(() => {
@@ -107,8 +252,6 @@ export const AmbulanceHomeScreen: React.FC<AmbulanceHomeScreenProps> = ({
     return () => clearInterval(timer);
   }, [incomingOffer, countdown, activeEmergency]);
 
-  const crewId = userProfile?.id || '33333333-3333-3333-3333-333333333333';
-
   const handleToggleOnline = async () => {
     if (activeEmergency) {
       Alert.alert('Operation Active', 'Cannot go offline while assigned to an active emergency.');
@@ -133,15 +276,15 @@ export const AmbulanceHomeScreen: React.FC<AmbulanceHomeScreenProps> = ({
         statusIndex: 0, // 'REQUEST_ACCEPTED'
         patientName: incomingOffer.patientName,
         patientPhone: incomingOffer.patientPhone,
-        patientBlood: 'O+',
-        patientNotes: 'Allergies: Penicillin',
+        patientBlood: incomingOffer.patientBlood || 'O+',
+        patientNotes: incomingOffer.patientNotes || 'Immediate assistance required',
         contactName: incomingOffer.contactName,
         contactPhone: incomingOffer.contactPhone,
         hospitalName: 'Apollo Hospitals Greams Road (Level 1 Trauma)',
         hospitalAddress: '21 Greams Lane, Thousand Lights, Chennai',
         hospitalPhone: '+914428290200',
-        patientLat: 13.0604,
-        patientLng: 80.2496,
+        patientLat: incomingOffer.patientLat,
+        patientLng: incomingOffer.patientLng,
         hospitalLat: 13.0604,
         hospitalLng: 80.2505
       });
@@ -231,7 +374,7 @@ export const AmbulanceHomeScreen: React.FC<AmbulanceHomeScreenProps> = ({
     height: 320,
     markers: [
       { lat: activeEmergency.patientLat, lng: activeEmergency.patientLng, color: 'red', label: 'P' },
-      { lat: 13.0720, lng: 80.2610, color: 'green', label: 'A' },
+      { lat: crewLocation.latitude, lng: crewLocation.longitude, color: 'green', label: 'A' },
       { lat: activeEmergency.hospitalLat, lng: activeEmergency.hospitalLng, color: 'blue', label: 'H' }
     ]
   }) : '';

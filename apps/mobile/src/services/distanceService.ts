@@ -66,6 +66,32 @@ export const distanceService = {
     return `${minutes} mins`;
   },
 
+  /**
+   * Safely parses coordinates from PostGIS GeoJSON, WKT string (e.g. 'POINT(lng lat)'), or object.
+   */
+  parsePoint(loc: any): LatLng | null {
+    if (!loc) return null;
+    if (typeof loc === 'object') {
+      if (Array.isArray(loc.coordinates) && loc.coordinates.length >= 2) {
+        // GeoJSON uses [longitude, latitude]
+        return { longitude: Number(loc.coordinates[0]), latitude: Number(loc.coordinates[1]) };
+      }
+      if (typeof loc.latitude === 'number' && typeof loc.longitude === 'number') {
+        return { latitude: loc.latitude, longitude: loc.longitude };
+      }
+      if (typeof loc.lat === 'number' && typeof loc.lng === 'number') {
+        return { latitude: loc.lat, longitude: loc.lng };
+      }
+    }
+    if (typeof loc === 'string') {
+      const match = loc.match(/POINT\s*\(\s*([-\d.]+)\s+([-\d.]+)\s*\)/i);
+      if (match) {
+        return { longitude: parseFloat(match[1]), latitude: parseFloat(match[2]) };
+      }
+    }
+    return null;
+  },
+
   toRadians(degrees: number): number {
     return (degrees * Math.PI) / 180;
   }

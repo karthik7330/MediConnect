@@ -1,7 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Alert, ActivityIndicator, ScrollView, Image } from 'react-native';
 import * as Location from 'expo-location';
-import { ShieldAlert, MapPin, XCircle, Clock, WifiOff, Users, ArrowLeftRight, Navigation, MessageSquare, LogOut, Phone, ExternalLink } from 'lucide-react-native';
+import { ShieldAlert, MapPin, XCircle, Clock, WifiOff, Users, ArrowLeftRight, Navigation, MessageSquare, LogOut, Phone, ExternalLink, Truck } from 'lucide-react-native';
 import { theme } from '../../lib/theme';
 import { supabase } from '../../lib/supabase';
 import { offlineQueueService } from '../../services/offlineQueue';
@@ -33,6 +33,94 @@ export const UserHomeScreen: React.FC<UserHomeScreenProps> = ({
   const [emergencyStatus, setEmergencyStatus] = useState<string | null>(null);
   const [isOfflineMode, setIsOfflineMode] = useState(false);
   const [lastCoords, setLastCoords] = useState<{ lat: number; lng: number } | null>(null);
+
+  // Assigned Ambulance Crew Telemetry
+  const [assignedCrew, setAssignedCrew] = useState<{
+    name: string;
+    phone: string;
+    vehicleNumber: string;
+    distanceText: string;
+    etaText: string;
+    ambulanceLat?: number;
+    ambulanceLng?: number;
+  } | null>(null);
+
+  // Synchronize live emergency status and assigned nearest ambulance crew
+  useEffect(() => {
+    if (!activeEmergencyId || isOfflineMode) return;
+
+    const fetchCrewInfo = async (crewId: string) => {
+      const crew = await emergencyService.getCrewDetails(crewId);
+      if (crew) {
+        let distText = 'En Route';
+        let etaText = '3 mins';
+        if (lastCoords && crew.location) {
+          const distKm = distanceService.calculateDistanceKm(
+            { latitude: lastCoords.lat, longitude: lastCoords.lng },
+            crew.location
+          );
+          distText = distanceService.formatDistance(distKm);
+          etaText = distanceService.formatEta(distanceService.calculateEtaMinutes(distKm));
+        }
+        setAssignedCrew({
+          name: crew.name,
+          phone: crew.phone,
+          vehicleNumber: crew.vehicleNumber,
+          distanceText: distText,
+          etaText: etaText,
+          ambulanceLat: crew.location?.latitude,
+          ambulanceLng: crew.location?.longitude
+        });
+      }
+    };
+
+    // Check initial request status & assigned ambulance
+    const checkInitial = async () => {
+      const { data } = await supabase
+        .from('emergency_requests')
+        .select('*')
+        .eq('id', activeEmergencyId)
+        .single();
+
+      if (data) {
+        setEmergencyStatus(data.current_status);
+        if (data.assigned_ambulance_id) {
+          fetchCrewInfo(data.assigned_ambulance_id);
+        }
+      }
+    };
+    checkInitial();
+
+    // Subscribe to real-time status updates (REQUEST_ACCEPTED, AMBULANCE_ON_THE_WAY, etc.)
+    const unsubscribe = emergencyService.subscribeToStatus(activeEmergencyId, async (newStatus, data) => {
+      setEmergencyStatus(newStatus);
+
+      if (data && data.assigned_ambulance_id) {
+        fetchCrewInfo(data.assigned_ambulance_id);
+      }
+
+      if (newStatus === 'EMERGENCY_RESOLVED') {
+        Alert.alert(
+          'Emergency Resolved',
+          'You have arrived safely at the trauma hospital. Medical team notified.'
+        );
+        await backgroundLocationService.stopTracking();
+        setActiveEmergencyId(null);
+        setEmergencyStatus(null);
+        setAssignedCrew(null);
+      } else if (newStatus === 'EMERGENCY_CANCELLED') {
+        Alert.alert('Emergency Cancelled', 'The emergency incident has been cancelled.');
+        await backgroundLocationService.stopTracking();
+        setActiveEmergencyId(null);
+        setEmergencyStatus(null);
+        setAssignedCrew(null);
+      }
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [activeEmergencyId, isOfflineMode, lastCoords]);
 
   // Requirement: SOS MUST activate immediately without a confirmation screen
   const handleImmediateSosTrigger = async () => {
@@ -115,6 +203,7 @@ export const UserHomeScreen: React.FC<UserHomeScreenProps> = ({
 
     setActiveEmergencyId(null);
     setEmergencyStatus(null);
+    setAssignedCrew(null);
     setIsOfflineMode(false);
     Alert.alert('SOS Cancelled', 'Your emergency request has been safely cancelled.');
   };
@@ -151,10 +240,47 @@ export const UserHomeScreen: React.FC<UserHomeScreenProps> = ({
             <View style={{ flex: 1, marginLeft: theme.spacing.sm }}>
               <Text style={styles.alertTitle}>EMERGENCY ACTIVE</Text>
               <Text style={styles.alertSubtitle}>
-                Status: {emergencyStatus === 'QUEUED_OFFLINE' ? 'Queued Offline (Pending Network)' : 'Searching Available Ambulances (5 km)'}
+                Status: {emergencyStatus ? emergencyStatus.replace(/_/g, ' ') : 'SEARCHING CLOSEST RESPONDERS'}
               </Text>
             </View>
           </View>
+
+          {/* Assigned Ambulance Crew Telemetry Card */}
+          {assignedCrew ? (
+            <View style={styles.assignedCrewCard}>
+              <View style={styles.crewCardHeader}>
+                <View style={styles.crewBadge}>
+                  <Truck size={14} color="#FFFFFF" />
+                  <Text style={styles.crewBadgeText}>NEAREST CREW ALLOCATED</Text>
+                </View>
+                <View style={styles.etaChip}>
+                  <Clock size={11} color="#065F46" />
+                  <Text style={styles.etaChipText}>{assignedCrew.distanceText} • ETA {assignedCrew.etaText}</Text>
+                </View>
+              </View>
+
+              <View style={styles.crewDetailsRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.crewVehicle}>{assignedCrew.vehicleNumber}</Text>
+                  <Text style={styles.crewOfficer}>Officer: {assignedCrew.name}</Text>
+                </View>
+                <TouchableOpacity
+                  style={styles.callCrewBtn}
+                  onPress={() => mapNavigationService.makePhoneCall(assignedCrew.phone, assignedCrew.name)}
+                >
+                  <Phone size={15} color="#FFFFFF" />
+                  <Text style={styles.callCrewBtnText}>Call Crew</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          ) : (
+            <View style={styles.searchingCard}>
+              <ActivityIndicator size="small" color="#DC2626" />
+              <Text style={styles.searchingText}>
+                Matching nearest emergency crew based on geodesic distance...
+              </Text>
+            </View>
+          )}
 
           {/* Live Google Map View for Citizen */}
           {lastCoords && (
@@ -169,6 +295,9 @@ export const UserHomeScreen: React.FC<UserHomeScreenProps> = ({
                     height: 280,
                     markers: [
                       { lat: lastCoords.lat, lng: lastCoords.lng, color: 'red', label: 'P' },
+                      ...(assignedCrew && assignedCrew.ambulanceLat && assignedCrew.ambulanceLng ? [
+                        { lat: assignedCrew.ambulanceLat, lng: assignedCrew.ambulanceLng, color: 'green', label: 'A' }
+                      ] : []),
                       { lat: 13.0604, lng: 80.2505, color: 'blue', label: 'H' }
                     ]
                   })
@@ -181,9 +310,15 @@ export const UserHomeScreen: React.FC<UserHomeScreenProps> = ({
                   <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#DC2626' }} />
                   <Text style={styles.legendText}>You (P)</Text>
                 </View>
+                {assignedCrew && (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                    <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#10B981' }} />
+                    <Text style={styles.legendText}>Ambulance (A)</Text>
+                  </View>
+                )}
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
                   <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#0284C7' }} />
-                  <Text style={styles.legendText}>Apollo Hospital (H)</Text>
+                  <Text style={styles.legendText}>Apollo Trauma (H)</Text>
                 </View>
               </View>
             </View>
@@ -561,5 +696,94 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: theme.colors.textSecondary,
     marginTop: 2
+  },
+  assignedCrewCard: {
+    backgroundColor: '#F0FDF4',
+    borderWidth: 1.5,
+    borderColor: '#86EFAC',
+    borderRadius: theme.borderRadius.md,
+    padding: theme.spacing.md,
+    marginBottom: theme.spacing.md
+  },
+  crewCardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 6
+  },
+  crewBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#059669',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: theme.borderRadius.full,
+    gap: 4
+  },
+  crewBadgeText: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: '800'
+  },
+  etaChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#DCFCE7',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: theme.borderRadius.full,
+    gap: 4
+  },
+  etaChipText: {
+    color: '#065F46',
+    fontSize: 11,
+    fontWeight: '700'
+  },
+  crewDetailsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: 4
+  },
+  crewVehicle: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: '#0F172A'
+  },
+  crewOfficer: {
+    fontSize: 12,
+    color: '#475569',
+    marginTop: 2
+  },
+  callCrewBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#059669',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: theme.borderRadius.md,
+    gap: 6
+  },
+  callCrewBtnText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '700'
+  },
+  searchingCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FEF2F2',
+    borderWidth: 1,
+    borderColor: '#FECACA',
+    borderRadius: theme.borderRadius.md,
+    padding: theme.spacing.md,
+    marginBottom: theme.spacing.md,
+    gap: 8
+  },
+  searchingText: {
+    flex: 1,
+    fontSize: 12,
+    color: '#991B1B',
+    fontWeight: '600'
   }
 });
