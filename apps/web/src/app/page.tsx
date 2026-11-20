@@ -8,11 +8,33 @@ import { ShieldAlert, LogOut, MapPin } from 'lucide-react';
 
 export default function HomePage() {
   const [currentUser, setCurrentUser] = useState<Profile | null>(null);
+  const [isSessionLoading, setIsSessionLoading] = useState(true);
   const [userLocation, setUserLocation] = useState<{ lat: number; lng: number; city: string }>({
     lat: 13.0895,
     lng: 80.2739,
     city: 'Chennai, Tamil Nadu'
   });
+
+  // Restore authenticated administrator session from localStorage
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        const savedSession = localStorage.getItem('mediconnect_admin_session');
+        if (savedSession) {
+          const parsed = JSON.parse(savedSession);
+          if (parsed && parsed.role && (parsed.role === 'MAIN_ADMIN' || parsed.role === 'SUB_ADMIN')) {
+            setCurrentUser(parsed);
+          }
+        }
+      } catch (err) {
+        console.warn('Session restoration failed:', err);
+      } finally {
+        setIsSessionLoading(false);
+      }
+    } else {
+      setIsSessionLoading(false);
+    }
+  }, []);
 
   // Detect live browser geolocation
   useEffect(() => {
@@ -33,7 +55,21 @@ export default function HomePage() {
     }
   }, []);
 
+  const handleLoginSuccess = (profile: Profile) => {
+    setCurrentUser(profile);
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem('mediconnect_admin_session', JSON.stringify(profile));
+      } catch (e) {
+        console.warn('Failed to persist admin session:', e);
+      }
+    }
+  };
+
   const handleLogout = () => {
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem('mediconnect_admin_session');
+    }
     setCurrentUser(null);
   };
 
@@ -88,9 +124,16 @@ export default function HomePage() {
 
       {/* Main Content */}
       <div className="flex-1 flex flex-col">
-        {!currentUser ? (
+        {isSessionLoading ? (
+          <div className="flex-1 flex items-center justify-center p-12">
+            <div className="flex items-center gap-3 text-slate-500 font-semibold text-xs">
+              <span className="w-4 h-4 border-2 border-red-600 border-t-transparent rounded-full animate-spin" />
+              <span>Verifying Command Session...</span>
+            </div>
+          </div>
+        ) : !currentUser ? (
           <RoleBasedLogin
-            onLoginSuccess={profile => setCurrentUser(profile)}
+            onLoginSuccess={handleLoginSuccess}
           />
         ) : (
           <AdminDashboard

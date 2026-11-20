@@ -73,76 +73,146 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setTimeout(() => setToastMessage(null), 3500);
   };
 
-  // Fetch real platform data from Supabase and APIs
-  const fetchPlatformData = async () => {
-    setLoading(true);
+  // Fetch real platform data from Supabase and APIs (with silent background sync)
+  const fetchPlatformData = async (silent: boolean = false) => {
+    if (!silent) setLoading(true);
 
-    // 1. Fetch live active emergencies from Supabase
-    const { data: emgData } = await supabase
-      .from('emergency_requests')
-      .select('*')
-      .neq('current_status', 'EMERGENCY_RESOLVED')
-      .order('created_at', { ascending: false });
+    try {
+      // 1. Fetch live active emergencies from Supabase
+      const { data: emgData } = await supabase
+        .from('emergency_requests')
+        .select('*')
+        .neq('current_status', 'EMERGENCY_RESOLVED')
+        .neq('current_status', 'EMERGENCY_CANCELLED')
+        .order('created_at', { ascending: false });
 
-    if (emgData) {
-      setActiveCalls(emgData);
-    }
+      if (emgData && emgData.length > 0) {
+        // Collect citizen user IDs and assigned ambulance IDs
+        const userIds = Array.from(new Set(emgData.map(c => c.user_id).filter(Boolean)));
+        const crewIds = Array.from(new Set(emgData.map(c => c.assigned_ambulance_id).filter(Boolean)));
+        const allProfileIds = Array.from(new Set([...userIds, ...crewIds]));
 
-    // 2. Fetch fleet crews
-    const { data: crewData } = await supabase
-      .from('ambulance_crews')
-      .select('*');
-
-    if (crewData) {
-      setFleetList(crewData);
-    }
-
-    // 3. Fetch regional hospitals
-    const { data: hospData } = await supabase
-      .from('hospitals')
-      .select('*')
-      .order('name');
-
-    if (hospData) {
-      setHospitalsList(hospData);
-    }
-
-    // 4. Fetch Sub-Admins list
-    if (isMainAdmin) {
-      try {
-        const res = await fetch('/api/admin/subadmins');
-        const data = await res.json();
-        if (data.subadmins) {
-          setSubAdmins(data.subadmins);
+        let profilesMap: Record<string, any> = {};
+        if (allProfileIds.length > 0) {
+          const { data: profs } = await supabase
+            .from('profiles')
+            .select('id, full_name, phone_number, blood_group')
+            .in('id', allProfileIds);
+          if (profs) {
+            profs.forEach(p => { profilesMap[p.id] = p; });
+          }
         }
-      } catch {
-        // Fallback query
-        const { data: subData } = await supabase
-          .from('profiles')
-          .select('*')
-          .eq('role', 'SUB_ADMIN');
-        if (subData) setSubAdmins(subData);
-      }
-    }
 
-    setLoading(false);
+        let crewMap: Record<string, any> = {};
+        if (crewIds.length > 0) {
+          const { data: crews } = await supabase
+            .from('ambulance_crews')
+            .select('id, vehicle_number, location, availability')
+            .in('id', crewIds);
+          if (crews) {
+            crews.forEach(c => { crewMap[c.id] = c; });
+          }
+        }
+
+        const enriched = emgData.map(call => {
+          const patient = profilesMap[call.user_id] || null;
+          const crew = call.assigned_ambulance_id ? crewMap[call.assigned_ambulance_id] : null;
+          const officer = call.assigned_ambulance_id ? profilesMap[call.assigned_ambulance_id] : null;
+
+          let coords: { lat: number; lng: number } | null = null;
+          if (call.user_location) {
+            if (typeof call.user_location === 'string') {
+              const m = call.user_location.match(/POINT\s*\(\s*([-\d.]+)\s+([-\d.]+)\s*\)/i);
+              if (m) coords = { lng: parseFloat(m[1]), lat: parseFloat(m[2]) };
+            } else if (call.user_location.coordinates && Array.isArray(call.user_location.coordinates)) {
+              coords = { lng: Number(call.user_location.coordinates[0]), lat: Number(call.user_location.coordinates[1]) };
+            }
+          }
+
+          return {
+            ...call,
+            coords,
+            patient,
+            assignedUnit: crew ? {
+              vehicleNumber: crew.vehicle_number || 'AMB-UNIT-1',
+              officerName: officer?.full_name || 'Paramedic Unit Officer',
+              officerPhone: officer?.phone_number || ''
+            } : null
+          };
+        });
+
+        setActiveCalls(enriched);
+      } else {
+        setActiveCalls([]);
+      }
+
+      // 2. Fetch fleet crews
+      const { data: crewData } = await supabase
+        .from('ambulance_crews')
+        .select('*');
+
+      if (crewData) {
+        setFleetList(crewData);
+      }
+
+      // 3. Fetch regional hospitals
+      const { data: hospData } = await supabase
+        .from('hospitals')
+        .select('*')
+        .order('name');
+
+      if (hospData) {
+        setHospitalsList(hospData);
+      }
+
+      // 4. Fetch Sub-Admins list
+      if (isMainAdmin) {
+        try {
+          const res = await fetch('/api/admin/subadmins');
+          const data = await res.json();
+          if (data.subadmins) {
+            setSubAdmins(data.subadmins);
+          }
+        } catch {
+          // Fallback query
+          const { data: subData } = await supabase
+            .from('profiles')
+            .select('*')
+            .eq('role', 'SUB_ADMIN');
+          if (subData) setSubAdmins(subData);
+        }
+      }
+    } catch (err) {
+      console.warn('Dashboard sync warning:', err);
+    } finally {
+      if (!silent) setLoading(false);
+    }
   };
 
   useEffect(() => {
-    fetchPlatformData();
+    fetchPlatformData(false);
 
-    // Supabase Realtime channel
+    // 1. Automatic silent polling every 3 seconds for continuous live telemetry sync
+    const pollInterval = setInterval(() => {
+      fetchPlatformData(true);
+    }, 3000);
+
+    // 2. Supabase Realtime channel subscription for immediate WebSocket push updates
     const channel = supabase
       .channel('admin_live_data_stream')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'emergency_requests' }, () => {
-        fetchPlatformData();
+        fetchPlatformData(true);
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'ambulance_crews' }, () => {
-        fetchPlatformData();
+        fetchPlatformData(true);
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'hospitals' }, () => {
+        fetchPlatformData(true);
       })
       .subscribe();
 
     return () => {
+      clearInterval(pollInterval);
       supabase.removeChannel(channel);
     };
   }, [isMainAdmin]);
@@ -288,7 +358,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </span>
             <span className="inline-flex items-center gap-1.5 text-xs text-emerald-600 font-bold bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-200">
               <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-              Command Center Live
+              Live Telemetry Stream • Auto-Sync 3s
             </span>
           </div>
           <h1 className="text-2xl font-black text-slate-900">
@@ -445,36 +515,85 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           {activeCalls.length > 0 ? (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {activeCalls.map(call => (
-                <div key={call.id} className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-sm flex flex-col justify-between">
+                <div key={call.id} className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-sm flex flex-col justify-between hover:border-slate-300 transition-all">
                   <div>
                     <div className="flex items-center justify-between mb-3">
                       <span className="font-mono text-xs font-bold text-slate-800">
-                        Incident: {call.id.slice(0, 16)}...
+                        Incident #{call.id.slice(0, 8)}
                       </span>
-                      <span className="px-2.5 py-0.5 rounded-full text-[11px] font-black uppercase bg-red-100 text-red-700">
-                        {call.current_status}
+                      <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-black uppercase ${
+                        call.current_status === 'SOS_ACTIVATED' ? 'bg-red-100 text-red-700 animate-pulse' :
+                        call.current_status === 'REQUEST_ACCEPTED' ? 'bg-blue-100 text-blue-700' :
+                        call.current_status === 'AMBULANCE_ON_THE_WAY' ? 'bg-amber-100 text-amber-700' :
+                        call.current_status === 'AMBULANCE_ARRIVED' ? 'bg-indigo-100 text-indigo-700' :
+                        'bg-emerald-100 text-emerald-700'
+                      }`}>
+                        {call.current_status.replace(/_/g, ' ')}
                       </span>
                     </div>
 
-                    <div className="space-y-1.5 text-xs text-slate-600 mb-4">
-                      <div className="flex items-center gap-2">
-                        <MapPin className="w-3.5 h-3.5 text-red-500 shrink-0" />
-                        <span className="font-semibold text-slate-900">{call.address_text || userLocation.city}</span>
+                    <div className="space-y-2.5 text-xs text-slate-600 mb-4">
+                      {/* Citizen Patient Info */}
+                      {call.patient && (
+                        <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-100 flex items-center justify-between">
+                          <div>
+                            <span className="font-bold text-slate-900 block">{call.patient.full_name}</span>
+                            <span className="text-[11px] text-slate-500 font-mono">{call.patient.phone_number}</span>
+                          </div>
+                          {call.patient.blood_group && (
+                            <span className="px-2 py-0.5 rounded-md text-[10px] font-black bg-red-100 text-red-700">
+                              Blood: {call.patient.blood_group}
+                            </span>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Incident Location & Live GPS */}
+                      <div className="flex items-start gap-2">
+                        <MapPin className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
+                        <div className="flex-1">
+                          <span className="font-semibold text-slate-900 block leading-tight">{call.address_text || userLocation.city}</span>
+                          {call.coords && (
+                            <div className="flex items-center gap-2 mt-1">
+                              <span className="text-[11px] font-mono text-slate-500">
+                                GPS: {call.coords.lat.toFixed(4)}, {call.coords.lng.toFixed(4)}
+                              </span>
+                              <a
+                                href={`https://www.google.com/maps?q=${call.coords.lat},${call.coords.lng}`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-[11px] text-blue-600 hover:underline font-semibold"
+                              >
+                                View on Map ↗
+                              </a>
+                            </div>
+                          )}
+                        </div>
                       </div>
-                      <div className="flex items-center gap-2">
-                        <Clock className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                        <span>Search Radius: {call.search_radius_meters || 5000}m</span>
+
+                      {/* Allocated Ambulance Telemetry */}
+                      <div className="flex items-center gap-2 pt-1 border-t border-slate-100">
+                        <Truck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                        {call.assignedUnit ? (
+                          <span className="text-xs font-semibold text-emerald-800">
+                            Unit: <strong className="font-bold text-slate-900">{call.assignedUnit.vehicleNumber}</strong> • Officer: {call.assignedUnit.officerName}
+                          </span>
+                        ) : (
+                          <span className="text-xs text-amber-700 font-medium">
+                            Auto-matching nearest available ambulance... (Radius: {call.search_radius_meters || 5000}m)
+                          </span>
+                        )}
                       </div>
                     </div>
                   </div>
 
                   <div className="pt-3 border-t border-slate-100 flex items-center justify-between">
                     <span className="text-[11px] text-slate-400">
-                      Sequential 60s Dispatch SLA
+                      Auto-syncing every 3s
                     </span>
                     <button
                       onClick={() => setSelectedIncidentForDispatch(call)}
-                      className="px-3.5 py-1.5 rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-xs flex items-center gap-1.5 shadow-sm"
+                      className="px-3.5 py-1.5 rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-xs flex items-center gap-1.5 shadow-sm transition-all"
                     >
                       <AlertTriangle className="w-3.5 h-3.5" />
                       <span>Manual Override</span>
