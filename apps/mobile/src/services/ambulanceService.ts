@@ -16,34 +16,55 @@ export const ambulanceService = {
     }
   },
 
-  // Atomic acceptance to eliminate race conditions
+  // Atomic acceptance to eliminate race conditions & support admin manual override
   async acceptEmergency(emergencyId: string, ambulanceId: string): Promise<{
     success: boolean;
     message: string;
   }> {
     try {
-      // 1. Try atomic RPC lock first
-      const { data, error } = await supabase.rpc('accept_emergency_assignment', {
-        p_emergency_id: emergencyId,
-        p_ambulance_id: ambulanceId
-      });
-
-      if (!error && data && (data as any).success) {
-        return data as { success: boolean; message: string };
-      }
-
-      // 2. Direct transactional check & update fallback
+      // 1. First check current request in Supabase
       const { data: currentReq } = await supabase
         .from('emergency_requests')
         .select('current_status, assigned_ambulance_id')
         .eq('id', emergencyId)
         .single();
 
-      if (
-        currentReq && 
-        currentReq.current_status === 'SOS_ACTIVATED' &&
-        (!currentReq.assigned_ambulance_id || currentReq.assigned_ambulance_id === ambulanceId)
-      ) {
+      if (!currentReq) {
+        return { success: false, message: 'Emergency request not found' };
+      }
+
+      if (currentReq.current_status === 'EMERGENCY_CANCELLED') {
+        return { success: false, message: 'Emergency request was cancelled by the citizen' };
+      }
+
+      if (currentReq.current_status === 'EMERGENCY_RESOLVED') {
+        return { success: false, message: 'Emergency has already been resolved' };
+      }
+
+      // Case A: Already assigned to THIS ambulance (e.g. by Admin Manual Dispatch Override)
+      if (currentReq.assigned_ambulance_id === ambulanceId) {
+        await this.updateAvailability(ambulanceId, 'BUSY');
+        await supabase.from('emergency_status_history').insert({
+          emergency_id: emergencyId,
+          status: currentReq.current_status || 'REQUEST_ACCEPTED',
+          updated_by: ambulanceId,
+          notes: 'Ambulance crew confirmed assignment and initiated navigation'
+        });
+        return { success: true, message: 'Emergency assigned successfully' };
+      }
+
+      // Case B: Unassigned SOS - try atomic RPC lock first
+      if (!currentReq.assigned_ambulance_id && currentReq.current_status === 'SOS_ACTIVATED') {
+        const { data, error } = await supabase.rpc('accept_emergency_assignment', {
+          p_emergency_id: emergencyId,
+          p_ambulance_id: ambulanceId
+        });
+
+        if (!error && data && (data as any).success) {
+          return data as { success: boolean; message: string };
+        }
+
+        // Direct transactional check & update fallback
         const { error: updateError } = await supabase
           .from('emergency_requests')
           .update({
@@ -51,7 +72,8 @@ export const ambulanceService = {
             assigned_ambulance_id: ambulanceId
           })
           .eq('id', emergencyId)
-          .eq('current_status', 'SOS_ACTIVATED');
+          .eq('current_status', 'SOS_ACTIVATED')
+          .is('assigned_ambulance_id', null);
 
         if (!updateError) {
           await this.updateAvailability(ambulanceId, 'BUSY');
@@ -67,9 +89,7 @@ export const ambulanceService = {
 
       return { 
         success: false, 
-        message: currentReq?.current_status === 'EMERGENCY_CANCELLED' 
-          ? 'Emergency request was cancelled by the citizen' 
-          : 'Emergency has already been accepted or resolved' 
+        message: 'Emergency has already been accepted or resolved' 
       };
     } catch (err: unknown) {
       return { success: false, message: err instanceof Error ? err.message : 'Assignment failed' };

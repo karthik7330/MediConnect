@@ -52,7 +52,7 @@ export const AmbulanceHomeScreen: React.FC<AmbulanceHomeScreenProps> = ({
     crewLocationRef.current = crewLocation;
   }, [crewLocation]);
 
-  // Real-time Incoming Dispatch Alert from Citizen SOS
+  // Real-time Incoming Dispatch Alert from Citizen SOS or Admin Manual Override
   const [incomingOffer, setIncomingOffer] = useState<{
     id: string;
     distance: string;
@@ -65,6 +65,8 @@ export const AmbulanceHomeScreen: React.FC<AmbulanceHomeScreenProps> = ({
     contactPhone: string;
     patientLat: number;
     patientLng: number;
+    isAdminOverride?: boolean;
+    initialStatus?: string;
   } | null>(null);
   const incomingOfferRef = useRef(incomingOffer);
   useEffect(() => {
@@ -115,6 +117,8 @@ export const AmbulanceHomeScreen: React.FC<AmbulanceHomeScreenProps> = ({
 
           await supabase.from('ambulance_crews').upsert({
             id: crewId,
+            vehicle_number: userProfile?.fullName ? `TN-01-AMB-${crewId.slice(0, 4).toUpperCase()}` : 'TN-01-AMB-4091',
+            license_number: 'PARA-TN-2026-994',
             availability: availability,
             is_approved: true,
             location: `POINT(${coords.longitude} ${coords.latitude})`,
@@ -127,12 +131,10 @@ export const AmbulanceHomeScreen: React.FC<AmbulanceHomeScreenProps> = ({
     };
 
     syncCrewLocation();
-  }, [crewId, availability]);
+  }, [crewId, availability, userProfile]);
 
-  // 2. Real-time listening for incoming emergency requests from Citizen SOS
+  // 2. Real-time listening for incoming emergency requests from Citizen SOS and Admin Manual Override
   useEffect(() => {
-    if (availability !== 'ONLINE' || activeEmergency) return;
-
     const processIncomingRequest = async (req: any) => {
       if (!req) return;
 
@@ -152,9 +154,14 @@ export const AmbulanceHomeScreen: React.FC<AmbulanceHomeScreenProps> = ({
       }
 
       // If request is resolved or no longer active, dismiss any matching offer
-      if (req.current_status !== 'SOS_ACTIVATED') {
+      if (req.current_status === 'EMERGENCY_RESOLVED') {
         if (incomingOfferRef.current?.id === req.id) {
           setIncomingOffer(null);
+        }
+        if (activeEmergencyRef.current?.id === req.id) {
+          setActiveEmergency(null);
+          setAvailability('ONLINE');
+          await backgroundLocationService.stopTracking();
         }
         return;
       }
@@ -167,10 +174,41 @@ export const AmbulanceHomeScreen: React.FC<AmbulanceHomeScreenProps> = ({
         return;
       }
 
-      // Stale request filter: only accept requests created within the last 10 minutes
-      if (req.created_at) {
+      // Check assignment relevance to this specific unit
+      const isDirectAssignment = req.assigned_ambulance_id === crewId;
+      const isOpenSos = !req.assigned_ambulance_id && req.current_status === 'SOS_ACTIVATED';
+
+      // If not directly assigned to this crew AND not an open SOS, dismiss/ignore
+      if (!isDirectAssignment && !isOpenSos) {
+        if (incomingOfferRef.current?.id === req.id) {
+          setIncomingOffer(null);
+        }
+        return;
+      }
+
+      // If it is an unassigned open SOS, only display if crew is ONLINE
+      if (isOpenSos && availability !== 'ONLINE') {
+        return;
+      }
+
+      // If this crew is already actively navigating this exact emergency, keep status index in sync
+      if (activeEmergencyRef.current?.id === req.id) {
+        const orderIdx = EMERGENCY_STATUS_ORDER.indexOf(req.current_status);
+        if (orderIdx >= 0 && orderIdx !== activeEmergencyRef.current?.statusIndex) {
+          setActiveEmergency(prev => prev ? { ...prev, statusIndex: orderIdx } : null);
+        }
+        return;
+      }
+
+      // If crew is actively busy with a DIFFERENT emergency, ignore new incoming offers
+      if (activeEmergencyRef.current && activeEmergencyRef.current.id !== req.id) {
+        return;
+      }
+
+      // Stale request filter: only filter open broadcasts created more than 15 mins ago
+      if (req.created_at && !isDirectAssignment) {
         const ageMs = Date.now() - new Date(req.created_at).getTime();
-        if (ageMs > 10 * 60 * 1000) {
+        if (ageMs > 15 * 60 * 1000) {
           return;
         }
       }
@@ -227,6 +265,8 @@ export const AmbulanceHomeScreen: React.FC<AmbulanceHomeScreenProps> = ({
       const distKm = distanceService.calculateDistanceKm(currentLoc, pCoords);
       const etaMins = distanceService.calculateEtaMinutes(distKm);
 
+      const isAdminOverride = isDirectAssignment && (req.current_status === 'AMBULANCE_DISPATCHED' || req.current_status === 'REQUEST_ACCEPTED');
+
       setIncomingOffer({
         id: req.id,
         distance: `${distanceService.formatDistance(distKm)} away (${distanceService.formatEta(etaMins)})`,
@@ -238,25 +278,45 @@ export const AmbulanceHomeScreen: React.FC<AmbulanceHomeScreenProps> = ({
         contactName,
         contactPhone,
         patientLat: pCoords.latitude,
-        patientLng: pCoords.longitude
+        patientLng: pCoords.longitude,
+        isAdminOverride,
+        initialStatus: req.current_status
       });
-      setCountdown(60);
+      setCountdown(isAdminOverride ? 120 : 60);
     };
 
-    // Query for any recent unhandled emergency request matching this crew (last 10 minutes)
+    // Query for any active emergency request matching this crew
     const checkExisting = async () => {
-      const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
-      const { data } = await supabase
+      const fifteenMinutesAgo = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+
+      // 1. Check for active emergency directly assigned to this crew (e.g. Admin Override)
+      const { data: directData } = await supabase
         .from('emergency_requests')
         .select('*')
-        .eq('current_status', 'SOS_ACTIVATED')
-        .gte('created_at', tenMinutesAgo)
-        .or(`assigned_ambulance_id.eq.${crewId},assigned_ambulance_id.is.null`)
+        .eq('assigned_ambulance_id', crewId)
+        .in('current_status', ['SOS_ACTIVATED', 'REQUEST_ACCEPTED', 'AMBULANCE_DISPATCHED', 'AMBULANCE_ON_THE_WAY', 'AMBULANCE_ARRIVED', 'PATIENT_PICKED_UP'])
         .order('created_at', { ascending: false })
         .limit(1);
 
-      if (data && data.length > 0) {
-        processIncomingRequest(data[0]);
+      if (directData && directData.length > 0) {
+        processIncomingRequest(directData[0]);
+        return;
+      }
+
+      // 2. Check for open unassigned SOS if crew is ONLINE
+      if (availability === 'ONLINE') {
+        const { data: openData } = await supabase
+          .from('emergency_requests')
+          .select('*')
+          .eq('current_status', 'SOS_ACTIVATED')
+          .is('assigned_ambulance_id', null)
+          .gte('created_at', fifteenMinutesAgo)
+          .order('created_at', { ascending: false })
+          .limit(1);
+
+        if (openData && openData.length > 0) {
+          processIncomingRequest(openData[0]);
+        }
       }
     };
     checkExisting();
@@ -278,7 +338,7 @@ export const AmbulanceHomeScreen: React.FC<AmbulanceHomeScreenProps> = ({
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [availability, Boolean(activeEmergency), crewId]);
+  }, [availability, crewId]);
 
   // 60-second countdown timer for offered SOS request
   useEffect(() => {
@@ -318,15 +378,17 @@ export const AmbulanceHomeScreen: React.FC<AmbulanceHomeScreenProps> = ({
   const handleAcceptEmergency = async () => {
     if (!incomingOffer) return;
     
-    // Call atomic RPC assignment
+    // Call atomic RPC assignment / direct assignment fallback
     const result = await ambulanceService.acceptEmergency(incomingOffer.id, crewId);
     
     if (result.success) {
       setAvailability('BUSY');
       const emgId = incomingOffer.id;
+      const startingIndex = incomingOffer.initialStatus === 'AMBULANCE_DISPATCHED' ? 1 : 0;
+
       setActiveEmergency({
         id: emgId,
-        statusIndex: 0, // 'REQUEST_ACCEPTED'
+        statusIndex: startingIndex,
         patientName: incomingOffer.patientName,
         patientPhone: incomingOffer.patientPhone,
         patientBlood: incomingOffer.patientBlood || 'O+',
@@ -352,11 +414,14 @@ export const AmbulanceHomeScreen: React.FC<AmbulanceHomeScreenProps> = ({
 
       // Dispatch alert
       await notificationService.dispatchStatusUpdate({
-        statusLabel: 'Dispatch Accepted',
+        statusLabel: startingIndex === 1 ? 'Ambulance Dispatched' : 'Dispatch Accepted',
         details: 'Navigating to patient location. Live GPS broadcasting active.'
       });
 
-      Alert.alert('Emergency Accepted', 'Atomic lock acquired. Navigation route generated.');
+      Alert.alert(
+        incomingOffer.isAdminOverride ? 'Command Dispatch Accepted' : 'Emergency Accepted',
+        'Assignment confirmed. Navigation route generated and live GPS broadcasting active.'
+      );
     } else {
       Alert.alert('Dispatch Claimed', result.message || 'Already accepted by a nearer responder.');
       setIncomingOffer(null);
@@ -645,16 +710,18 @@ export const AmbulanceHomeScreen: React.FC<AmbulanceHomeScreenProps> = ({
             <Text style={styles.cancelAssignText}>Cancel Assignment (Reassign)</Text>
           </TouchableOpacity>
         </View>
-      ) : incomingOffer && availability === 'ONLINE' ? (
-        /* Incoming SOS Offer Card with 60s Countdown */
-        <View style={styles.offerCard}>
+      ) : incomingOffer && (availability === 'ONLINE' || incomingOffer.isAdminOverride) ? (
+        /* Incoming SOS Offer Card or Admin Command Manual Override Card */
+        <View style={[styles.offerCard, incomingOffer.isAdminOverride && { borderColor: '#DC2626', borderWidth: 2, backgroundColor: '#FEF2F2' }]}>
           <View style={styles.offerHeader}>
-            <AlertCircle size={26} color={theme.colors.primary} />
+            <AlertCircle size={26} color={incomingOffer.isAdminOverride ? '#DC2626' : theme.colors.primary} />
             <View style={{ flex: 1, marginLeft: theme.spacing.sm }}>
-              <Text style={styles.offerTitle}>NEW SOS DISPATCH OFFER</Text>
+              <Text style={[styles.offerTitle, incomingOffer.isAdminOverride && { color: '#DC2626', fontWeight: '900' }]}>
+                {incomingOffer.isAdminOverride ? '🚨 COMMAND MANUAL DISPATCH' : 'NEW SOS DISPATCH OFFER'}
+              </Text>
               <Text style={styles.offerDistance}>{incomingOffer.distance}</Text>
             </View>
-            <View style={styles.countdownBox}>
+            <View style={[styles.countdownBox, incomingOffer.isAdminOverride && { backgroundColor: '#DC2626' }]}>
               <Text style={styles.countdownText}>{countdown}s</Text>
             </View>
           </View>
@@ -663,20 +730,32 @@ export const AmbulanceHomeScreen: React.FC<AmbulanceHomeScreenProps> = ({
           
           <View style={styles.offerPreviewBox}>
             <Text style={styles.offerPreviewText}>
-              Patient: <Text style={{ fontWeight: '700' }}>{incomingOffer.patientName}</Text> • Contact: <Text style={{ fontWeight: '700' }}>{incomingOffer.contactName}</Text>
+              Patient: <Text style={{ fontWeight: '700' }}>{incomingOffer.patientName}</Text> ({incomingOffer.patientBlood || 'O+'}) • Contact: <Text style={{ fontWeight: '700' }}>{incomingOffer.contactName}</Text>
             </Text>
+            {incomingOffer.patientNotes ? (
+              <Text style={[styles.offerPreviewText, { marginTop: 4, color: '#475569' }]}>
+                Notes: <Text style={{ fontStyle: 'italic' }}>{incomingOffer.patientNotes}</Text>
+              </Text>
+            ) : null}
           </View>
 
-          <Text style={styles.offerNotice}>
-            Respond within 60s. Atomic allocation will assign to the nearest responding crew.
+          <Text style={[styles.offerNotice, incomingOffer.isAdminOverride && { color: '#B91C1C', fontWeight: '700' }]}>
+            {incomingOffer.isAdminOverride 
+              ? 'Priority dispatch assigned directly by Central Command Administrator. Confirm assignment to initiate navigation.'
+              : 'Respond within 60s. Atomic allocation will assign to the nearest responding crew.'}
           </Text>
 
           <View style={styles.offerBtnGroup}>
             <TouchableOpacity style={styles.rejectBtn} onPress={handleRejectEmergency}>
-              <Text style={styles.rejectBtnText}>Decline</Text>
+              <Text style={styles.rejectBtnText}>{incomingOffer.isAdminOverride ? 'Decline (Re-route)' : 'Decline'}</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.acceptBtn} onPress={handleAcceptEmergency}>
-              <Text style={styles.acceptBtnText}>Accept Dispatch</Text>
+            <TouchableOpacity 
+              style={[styles.acceptBtn, incomingOffer.isAdminOverride && { backgroundColor: '#DC2626' }]} 
+              onPress={handleAcceptEmergency}
+            >
+              <Text style={styles.acceptBtnText}>
+                {incomingOffer.isAdminOverride ? 'Accept & Start Navigation' : 'Accept Dispatch'}
+              </Text>
             </TouchableOpacity>
           </View>
         </View>

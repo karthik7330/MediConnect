@@ -310,10 +310,25 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   // Manual Dispatch Override
   const handleManualDispatchConfirm = async (unitId: string) => {
     if (!selectedIncidentForDispatch) return;
+
+    // 1. Update emergency request with assignment and status
     await supabase.from('emergency_requests').update({
       current_status: 'AMBULANCE_DISPATCHED',
       assigned_ambulance_id: unitId
     }).eq('id', selectedIncidentForDispatch.id);
+
+    // 2. Mark assigned ambulance crew as BUSY in fleet table
+    await supabase.from('ambulance_crews').update({
+      availability: 'BUSY'
+    }).eq('id', unitId);
+
+    // 3. Record in immutable audit / progression history
+    await supabase.from('emergency_status_history').insert({
+      emergency_id: selectedIncidentForDispatch.id,
+      status: 'AMBULANCE_DISPATCHED',
+      updated_by: currentProfile.id || unitId,
+      notes: `Manual dispatch override assigned to unit ${unitId.slice(0, 8)} by Admin (${currentProfile.fullName || 'Admin'})`
+    });
 
     showToast(`Manual Dispatch Override complete: Assigned ambulance to incident.`);
     setAuditLogs(prev => [{
@@ -878,20 +893,32 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </p>
 
             <div className="space-y-2 mb-6">
-              {fleetList.map(u => (
-                <div key={u.id} className="p-3 rounded-xl border border-slate-200 hover:border-red-500/50 flex items-center justify-between">
-                  <div>
-                    <div className="text-xs font-bold text-slate-900">{u.vehicle_number}</div>
-                    <div className="text-[11px] text-slate-500 font-mono">License: {u.license_number}</div>
+              {fleetList.length > 0 ? (
+                fleetList.map(u => (
+                  <div key={u.id} className="p-3 rounded-xl border border-slate-200 hover:border-red-500/50 flex items-center justify-between">
+                    <div>
+                      <div className="text-xs font-bold text-slate-900">{u.vehicle_number}</div>
+                      <div className="text-[11px] text-slate-500 font-mono">License: {u.license_number}</div>
+                    </div>
+                    <button
+                      onClick={() => handleManualDispatchConfirm(u.id)}
+                      className="px-3.5 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 text-white font-bold text-xs"
+                    >
+                      Assign Unit
+                    </button>
                   </div>
+                ))
+              ) : (
+                <div className="p-4 rounded-xl border border-dashed border-slate-300 text-center">
+                  <p className="text-xs text-slate-500 mb-2">No active units in local fleet list. Assign standby unit:</p>
                   <button
-                    onClick={() => handleManualDispatchConfirm(u.id)}
-                    className="px-3.5 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 text-white font-bold text-xs"
+                    onClick={() => handleManualDispatchConfirm('33333333-3333-3333-3333-333333333333')}
+                    className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-xs shadow-sm"
                   >
-                    Assign Unit
+                    Assign Unit TN-01-AMB-4091
                   </button>
                 </div>
-              ))}
+              )}
             </div>
 
             <div className="flex justify-end">
