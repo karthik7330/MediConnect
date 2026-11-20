@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ScrollView, Alert, Modal, Image } from 'react-native';
 import { 
   Truck, 
@@ -47,6 +47,10 @@ export const AmbulanceHomeScreen: React.FC<AmbulanceHomeScreenProps> = ({
     latitude: 13.0827,
     longitude: 80.2707
   });
+  const crewLocationRef = useRef(crewLocation);
+  useEffect(() => {
+    crewLocationRef.current = crewLocation;
+  }, [crewLocation]);
 
   // Real-time Incoming Dispatch Alert from Citizen SOS
   const [incomingOffer, setIncomingOffer] = useState<{
@@ -62,6 +66,11 @@ export const AmbulanceHomeScreen: React.FC<AmbulanceHomeScreenProps> = ({
     patientLat: number;
     patientLng: number;
   } | null>(null);
+  const incomingOfferRef = useRef(incomingOffer);
+  useEffect(() => {
+    incomingOfferRef.current = incomingOffer;
+  }, [incomingOffer]);
+
   const [countdown, setCountdown] = useState(60);
 
   // Active Emergency Assignment state with Patient & Emergency Contact details
@@ -82,6 +91,10 @@ export const AmbulanceHomeScreen: React.FC<AmbulanceHomeScreenProps> = ({
     hospitalLat: number;
     hospitalLng: number;
   } | null>(null);
+  const activeEmergencyRef = useRef(activeEmergency);
+  useEffect(() => {
+    activeEmergencyRef.current = activeEmergency;
+  }, [activeEmergency]);
 
   // Cancellation Modal
   const [cancelModalVisible, setCancelModalVisible] = useState(false);
@@ -121,9 +134,46 @@ export const AmbulanceHomeScreen: React.FC<AmbulanceHomeScreenProps> = ({
     if (availability !== 'ONLINE' || activeEmergency) return;
 
     const processIncomingRequest = async (req: any) => {
-      if (!req || req.current_status !== 'SOS_ACTIVATED') return;
-      // Only process if assigned specifically to this crew or open for nearest allocation
-      if (req.assigned_ambulance_id && req.assigned_ambulance_id !== crewId) return;
+      if (!req) return;
+
+      // Citizen cancelled request: immediately dismiss incoming offer or active emergency
+      if (req.current_status === 'EMERGENCY_CANCELLED') {
+        if (incomingOfferRef.current?.id === req.id) {
+          setIncomingOffer(null);
+          Alert.alert('Request Cancelled', 'The citizen has cancelled this emergency request.');
+        }
+        if (activeEmergencyRef.current?.id === req.id) {
+          setActiveEmergency(null);
+          setAvailability('ONLINE');
+          await backgroundLocationService.stopTracking();
+          Alert.alert('Emergency Cancelled', 'The citizen has cancelled the emergency request.');
+        }
+        return;
+      }
+
+      // If request is resolved or no longer active, dismiss any matching offer
+      if (req.current_status !== 'SOS_ACTIVATED') {
+        if (incomingOfferRef.current?.id === req.id) {
+          setIncomingOffer(null);
+        }
+        return;
+      }
+
+      // If assigned specifically to a different crew, dismiss from this crew's view
+      if (req.assigned_ambulance_id && req.assigned_ambulance_id !== crewId) {
+        if (incomingOfferRef.current?.id === req.id) {
+          setIncomingOffer(null);
+        }
+        return;
+      }
+
+      // Stale request filter: only accept requests created within the last 10 minutes
+      if (req.created_at) {
+        const ageMs = Date.now() - new Date(req.created_at).getTime();
+        if (ageMs > 10 * 60 * 1000) {
+          return;
+        }
+      }
 
       const pCoords = distanceService.parsePoint(req.user_location) || { latitude: 13.0895, longitude: 80.2739 };
 
@@ -172,8 +222,9 @@ export const AmbulanceHomeScreen: React.FC<AmbulanceHomeScreenProps> = ({
         }
       }
 
-      // Dynamic distance and ETA computation
-      const distKm = distanceService.calculateDistanceKm(crewLocation, pCoords);
+      // Dynamic distance and ETA computation from latest crew GPS coordinates
+      const currentLoc = crewLocationRef.current;
+      const distKm = distanceService.calculateDistanceKm(currentLoc, pCoords);
       const etaMins = distanceService.calculateEtaMinutes(distKm);
 
       setIncomingOffer({
@@ -192,12 +243,14 @@ export const AmbulanceHomeScreen: React.FC<AmbulanceHomeScreenProps> = ({
       setCountdown(60);
     };
 
-    // Query for any existing unhandled emergency request matching this crew
+    // Query for any recent unhandled emergency request matching this crew (last 10 minutes)
     const checkExisting = async () => {
+      const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
       const { data } = await supabase
         .from('emergency_requests')
         .select('*')
         .eq('current_status', 'SOS_ACTIVATED')
+        .gte('created_at', tenMinutesAgo)
         .or(`assigned_ambulance_id.eq.${crewId},assigned_ambulance_id.is.null`)
         .order('created_at', { ascending: false })
         .limit(1);
@@ -225,7 +278,7 @@ export const AmbulanceHomeScreen: React.FC<AmbulanceHomeScreenProps> = ({
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [availability, activeEmergency, crewLocation, crewId]);
+  }, [availability, Boolean(activeEmergency), crewId]);
 
   // 60-second countdown timer for offered SOS request
   useEffect(() => {

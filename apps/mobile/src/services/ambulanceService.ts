@@ -22,16 +22,55 @@ export const ambulanceService = {
     message: string;
   }> {
     try {
+      // 1. Try atomic RPC lock first
       const { data, error } = await supabase.rpc('accept_emergency_assignment', {
         p_emergency_id: emergencyId,
         p_ambulance_id: ambulanceId
       });
 
-      if (error) {
-        return { success: false, message: error.message };
+      if (!error && data && (data as any).success) {
+        return data as { success: boolean; message: string };
       }
 
-      return data as { success: boolean; message: string };
+      // 2. Direct transactional check & update fallback
+      const { data: currentReq } = await supabase
+        .from('emergency_requests')
+        .select('current_status, assigned_ambulance_id')
+        .eq('id', emergencyId)
+        .single();
+
+      if (
+        currentReq && 
+        currentReq.current_status === 'SOS_ACTIVATED' &&
+        (!currentReq.assigned_ambulance_id || currentReq.assigned_ambulance_id === ambulanceId)
+      ) {
+        const { error: updateError } = await supabase
+          .from('emergency_requests')
+          .update({
+            current_status: 'REQUEST_ACCEPTED',
+            assigned_ambulance_id: ambulanceId
+          })
+          .eq('id', emergencyId)
+          .eq('current_status', 'SOS_ACTIVATED');
+
+        if (!updateError) {
+          await this.updateAvailability(ambulanceId, 'BUSY');
+          await supabase.from('emergency_status_history').insert({
+            emergency_id: emergencyId,
+            status: 'REQUEST_ACCEPTED',
+            updated_by: ambulanceId,
+            notes: 'Dispatch accepted by crew via direct assignment'
+          });
+          return { success: true, message: 'Emergency assigned successfully' };
+        }
+      }
+
+      return { 
+        success: false, 
+        message: currentReq?.current_status === 'EMERGENCY_CANCELLED' 
+          ? 'Emergency request was cancelled by the citizen' 
+          : 'Emergency has already been accepted or resolved' 
+      };
     } catch (err: unknown) {
       return { success: false, message: err instanceof Error ? err.message : 'Assignment failed' };
     }
