@@ -28,12 +28,15 @@ import {
   ChevronRight,
   RefreshCw,
   MapPin,
-  ExternalLink
+  ExternalLink,
+  Truck
 } from 'lucide-react-native';
 import { theme } from '../../lib/theme';
 import { supabase } from '../../lib/supabase';
 import { contactService } from '../../services/contactService';
 import { mapNavigationService } from '../../services/mapNavigationService';
+import { distanceService } from '../../services/distanceService';
+import { LiveMapCard } from '../../components/common/LiveMapCard';
 import { Profile } from '@mediconnect/shared';
 
 interface ContactHomeScreenProps {
@@ -51,6 +54,16 @@ export const ContactHomeScreen: React.FC<ContactHomeScreenProps> = ({
 }) => {
   const [hasAcknowledged, setHasAcknowledged] = useState(false);
   const [activeEmergency, setActiveEmergency] = useState<any | null>(null);
+
+  // Live Assigned Ambulance Telemetry (Only active once driver accepts SOS)
+  const [assignedAmbulance, setAssignedAmbulance] = useState<{
+    id: string;
+    vehicleNumber: string;
+    phone: string;
+    officerName: string;
+    coords: { latitude: number; longitude: number } | null;
+    speedKmh?: number;
+  } | null>(null);
 
   // Incoming Connection Requests & Connected Citizens
   const [incomingRequests, setIncomingRequests] = useState<any[]>([]);
@@ -79,7 +92,44 @@ export const ContactHomeScreen: React.FC<ContactHomeScreenProps> = ({
     }
   };
 
-  // 2. Fetch Active Emergency Incidents with Patient & Hospital Joins
+  // 2. Fetch Ambulance Telemetry directly from ambulance_crews and live_ambulance_tracking
+  const fetchAmbulanceTelemetry = async (crewId: string, emergencyId: string) => {
+    try {
+      const { data: crew } = await supabase
+        .from('ambulance_crews')
+        .select('id, vehicle_number, location, last_location_update')
+        .eq('id', crewId)
+        .single();
+
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('full_name, phone_number')
+        .eq('id', crewId)
+        .maybeSingle();
+
+      const { data: liveTrack } = await supabase
+        .from('live_ambulance_tracking')
+        .select('current_location, speed_kmh, heading')
+        .eq('emergency_id', emergencyId)
+        .maybeSingle();
+
+      const rawLoc = liveTrack?.current_location || crew?.location;
+      const crewCoords = distanceService.parsePoint(rawLoc);
+
+      setAssignedAmbulance({
+        id: crewId,
+        vehicleNumber: crew?.vehicle_number || 'TN-01-AMB-4091',
+        phone: profile?.phone_number || '+919876543210',
+        officerName: profile?.full_name || 'Paramedic Unit Officer',
+        coords: crewCoords,
+        speedKmh: liveTrack?.speed_kmh ? Number(liveTrack.speed_kmh) : 48
+      });
+    } catch (err) {
+      console.warn('[ContactHomeScreen] Error fetching ambulance telemetry:', err);
+    }
+  };
+
+  // 3. Fetch Active Emergency Incidents with Patient & Hospital Joins
   const fetchActiveEmergency = async () => {
     try {
       const { data } = await supabase
@@ -97,11 +147,19 @@ export const ContactHomeScreen: React.FC<ContactHomeScreenProps> = ({
 
       if (data) {
         setActiveEmergency(data);
+        const hasAccepted = data.assigned_ambulance_id && data.current_status !== 'SOS_ACTIVATED';
+        if (hasAccepted) {
+          fetchAmbulanceTelemetry(data.assigned_ambulance_id, data.id);
+        } else {
+          setAssignedAmbulance(null);
+        }
       } else {
         setActiveEmergency(null);
+        setAssignedAmbulance(null);
       }
     } catch {
       setActiveEmergency(null);
+      setAssignedAmbulance(null);
     }
   };
 
@@ -114,6 +172,26 @@ export const ContactHomeScreen: React.FC<ContactHomeScreenProps> = ({
       .channel('contact_live_feed')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'emergency_requests' }, () => {
         fetchActiveEmergency();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'live_ambulance_tracking' }, (payload: any) => {
+        if (payload.new) {
+          const parsed = distanceService.parsePoint(payload.new.current_location);
+          if (parsed) {
+            setAssignedAmbulance(prev => prev ? {
+              ...prev,
+              coords: parsed,
+              speedKmh: payload.new.speed_kmh ? Number(payload.new.speed_kmh) : prev.speedKmh
+            } : null);
+          }
+        }
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'ambulance_crews' }, (payload: any) => {
+        if (payload.new) {
+          const parsed = distanceService.parsePoint(payload.new.location);
+          if (parsed) {
+            setAssignedAmbulance(prev => prev ? { ...prev, coords: parsed } : null);
+          }
+        }
       })
       .subscribe();
 
@@ -189,32 +267,16 @@ export const ContactHomeScreen: React.FC<ContactHomeScreenProps> = ({
     mapNavigationService.openNavigation(lat, lng, name);
   };
 
-  // Coordinates for active emergency (Chennai Greams Rd default fallback)
-  const patientLat = 13.0604;
-  const patientLng = 80.2496;
-  const hospitalLat = 13.0604;
-  const hospitalLng = 80.2505;
-  const ambulanceLat = 13.0720;
-  const ambulanceLng = 80.2610;
+  // Dynamically parse live coordinates from active incident
+  const patientCoords = activeEmergency ? distanceService.parsePoint(activeEmergency.user_location) : null;
+  const hospitalCoords = activeEmergency?.hospital?.location
+    ? distanceService.parsePoint(activeEmergency.hospital.location)
+    : { latitude: 13.0604, longitude: 80.2505 };
 
-  // Real Google Maps Static Map Image URL
-  const googleMapStaticUrl = mapNavigationService.getStaticMapUrl({
-    centerLat: patientLat,
-    centerLng: patientLng,
-    zoom: 14,
-    width: 600,
-    height: 320,
-    markers: [
-      { lat: patientLat, lng: patientLng, color: 'red', label: 'P' },
-      { lat: ambulanceLat, lng: ambulanceLng, color: 'green', label: 'A' },
-      { lat: hospitalLat, lng: hospitalLng, color: 'blue', label: 'H' }
-    ]
-  });
-
-  const patientName = activeEmergency?.patient?.full_name || 'Karthik';
+  const patientName = activeEmergency?.patient?.full_name || 'Citizen User';
   const patientPhone = activeEmergency?.patient?.phone_number || '+919876543210';
   const patientBlood = activeEmergency?.patient?.blood_group || 'O+';
-  const patientNotes = activeEmergency?.patient?.medical_notes || 'Allergies: Penicillin';
+  const patientNotes = activeEmergency?.patient?.medical_notes || 'Immediate assistance requested';
 
   const hospitalName = activeEmergency?.hospital?.name || 'Apollo Hospitals Greams Road (Level 1 Trauma)';
   const hospitalAddress = activeEmergency?.hospital?.address || '21 Greams Lane, Thousand Lights, Chennai';
@@ -349,56 +411,67 @@ export const ContactHomeScreen: React.FC<ContactHomeScreenProps> = ({
             <Text style={styles.statusValue}>{activeEmergency.current_status || 'SOS_ACTIVATED'}</Text>
           </View>
 
-          {/* Location Address */}
+          {/* Incident Address */}
           <View style={styles.detailRow}>
             <MapPin size={16} color={theme.colors.primary} />
-            <Text style={styles.detailText}>{activeEmergency.address_text || 'Near Greams Road, Chennai Sector'}</Text>
+            <Text style={styles.detailText}>
+              {activeEmergency.address_text || (patientCoords ? `GPS (${patientCoords.latitude.toFixed(5)}, ${patientCoords.longitude.toFixed(5)})` : 'Incident Location GPS')}
+            </Text>
           </View>
 
           {/* ================================================================ */}
-          {/* GOOGLE MAPS LIVE LOCATION VIEW                                   */}
+          {/* RESPONDER LIVE DISPATCH TELEMETRY (Only shown once accepted)     */}
           {/* ================================================================ */}
-          <View style={styles.mapContainer}>
-            <Image 
-              source={{ uri: googleMapStaticUrl }} 
-              style={styles.mapImage}
-              resizeMode="cover"
-            />
-            {/* Map Legend Overlay */}
-            <View style={styles.mapLegend}>
-              <View style={styles.legendItem}>
-                <View style={[styles.legendDot, { backgroundColor: '#DC2626' }]} />
-                <Text style={styles.legendText}>Patient (P)</Text>
+          {assignedAmbulance ? (
+            <View style={styles.responderBox}>
+              <View style={styles.responderHeader}>
+                <Truck size={16} color="#16A34A" />
+                <Text style={styles.responderTitle}>RESPONDING CREW: {assignedAmbulance.vehicleNumber}</Text>
               </View>
-              <View style={styles.legendItem}>
-                <View style={[styles.legendDot, { backgroundColor: '#16A34A' }]} />
-                <Text style={styles.legendText}>Ambulance (A)</Text>
-              </View>
-              <View style={styles.legendItem}>
-                <View style={[styles.legendDot, { backgroundColor: '#0284C7' }]} />
-                <Text style={styles.legendText}>Hospital (H)</Text>
-              </View>
+              <Text style={styles.responderSub}>
+                Officer: {assignedAmbulance.officerName} • Driver accepted & transmitting live GPS
+              </Text>
+              <TouchableOpacity
+                style={styles.responderCallBtn}
+                onPress={() => mapNavigationService.makePhoneCall(assignedAmbulance.phone, assignedAmbulance.officerName)}
+              >
+                <Phone size={13} color="#FFFFFF" style={{ marginRight: 6 }} />
+                <Text style={styles.responderCallBtnText}>Call Driver ({assignedAmbulance.phone})</Text>
+              </TouchableOpacity>
             </View>
-          </View>
+          ) : (
+            <View style={styles.waitingResponderBox}>
+              <Clock size={16} color="#D97706" />
+              <Text style={styles.waitingResponderText}>
+                Matching closest emergency responder... Live ambulance coordinates will stream here the instant the driver accepts.
+              </Text>
+            </View>
+          )}
 
-          {/* One-Tap Google Maps Navigation Buttons */}
-          <View style={styles.navButtonsRow}>
-            <TouchableOpacity 
-              style={styles.googleNavButton}
-              onPress={() => handleNavigateToPatient(patientLat, patientLng, patientName)}
-            >
-              <Navigation size={16} color="#FFFFFF" style={{ marginRight: 6 }} />
-              <Text style={styles.googleNavButtonText}>Navigate to Patient</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity 
-              style={[styles.googleNavButton, { backgroundColor: '#0369A1' }]}
-              onPress={() => handleNavigateToHospital(hospitalLat, hospitalLng, hospitalName)}
-            >
-              <ExternalLink size={16} color="#FFFFFF" style={{ marginRight: 6 }} />
-              <Text style={styles.googleNavButtonText}>Navigate to Hospital</Text>
-            </TouchableOpacity>
-          </View>
+          {/* ================================================================ */}
+          {/* LIVE PRECISION SATELLITE MAP CARD (Guaranteed No Blank Screen)   */}
+          {/* ================================================================ */}
+          <LiveMapCard
+            patientCoords={patientCoords}
+            ambulanceCoords={assignedAmbulance?.coords || null}
+            hospitalCoords={hospitalCoords}
+            patientName={patientName}
+            ambulanceTitle={assignedAmbulance?.vehicleNumber}
+            hospitalName={hospitalName}
+            statusLabel={activeEmergency.current_status}
+            onNavigatePatient={() => {
+              if (patientCoords) {
+                handleNavigateToPatient(patientCoords.latitude, patientCoords.longitude, patientName);
+              } else {
+                Alert.alert('GPS Pending', 'Acquiring patient satellite coordinates...');
+              }
+            }}
+            onNavigateHospital={() => {
+              if (hospitalCoords) {
+                handleNavigateToHospital(hospitalCoords.latitude, hospitalCoords.longitude, hospitalName);
+              }
+            }}
+          />
 
           {/* Direct Phone Dialer & SMS Actions (Direct native dialer) */}
           <View style={styles.contactActions}>
@@ -859,6 +932,61 @@ const styles = StyleSheet.create({
   },
 
   // Nav Buttons
+  responderBox: {
+    backgroundColor: '#F0FDF4',
+    borderWidth: 1,
+    borderColor: '#86EFAC',
+    borderRadius: theme.borderRadius.md,
+    padding: 12,
+    marginBottom: theme.spacing.sm
+  },
+  responderHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 4
+  },
+  responderTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#166534'
+  },
+  responderSub: {
+    fontSize: 11,
+    color: '#15803D',
+    marginBottom: 8
+  },
+  responderCallBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#16A34A',
+    paddingVertical: 8,
+    borderRadius: theme.borderRadius.sm
+  },
+  responderCallBtnText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '700'
+  },
+  waitingResponderBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#FFFBEB',
+    borderWidth: 1,
+    borderColor: '#FDE68A',
+    borderRadius: theme.borderRadius.md,
+    padding: 12,
+    marginBottom: theme.spacing.sm
+  },
+  waitingResponderText: {
+    flex: 1,
+    fontSize: 11,
+    color: '#B45309',
+    fontWeight: '500',
+    lineHeight: 16
+  },
   navButtonsRow: {
     flexDirection: 'row',
     gap: 8,

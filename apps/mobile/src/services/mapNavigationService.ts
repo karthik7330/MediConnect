@@ -10,7 +10,7 @@ export interface MapMarker {
 }
 
 export const mapNavigationService = {
-  // Generate Google Static Maps URL with multiple custom markers
+  // Generate Google Static Maps URL or OpenStreetMap static fallback
   getStaticMapUrl(params: {
     centerLat: number;
     centerLng: number;
@@ -21,21 +21,33 @@ export const mapNavigationService = {
   }): string {
     const { centerLat, centerLng, zoom = 14, width = 600, height = 320, markers = [] } = params;
 
-    let url = `https://maps.googleapis.com/maps/api/staticmap?center=${centerLat},${centerLng}&zoom=${zoom}&size=${width}x${height}&scale=2&maptype=roadmap`;
+    // 1. If Google Maps API Key is provided, use Google Static Maps
+    if (GOOGLE_MAPS_API_KEY && GOOGLE_MAPS_API_KEY.trim()) {
+      let url = `https://maps.googleapis.com/maps/api/staticmap?center=${centerLat},${centerLng}&zoom=${zoom}&size=${width}x${height}&scale=2&maptype=roadmap`;
 
-    // Add markers
-    if (markers.length > 0) {
-      markers.forEach(m => {
-        const color = m.color || 'red';
-        const label = m.label ? `label:${m.label}%7C` : '';
-        url += `&markers=color:${color}%7C${label}${m.lat},${m.lng}`;
-      });
-    } else {
-      url += `&markers=color:red%7C${centerLat},${centerLng}`;
+      if (markers.length > 0) {
+        markers.forEach(m => {
+          const color = m.color || 'red';
+          const label = m.label ? `label:${m.label}%7C` : '';
+          url += `&markers=color:${color}%7C${label}${m.lat},${m.lng}`;
+        });
+      } else {
+        url += `&markers=color:red%7C${centerLat},${centerLng}`;
+      }
+
+      url += `&key=${GOOGLE_MAPS_API_KEY.trim()}`;
+      return url;
     }
 
-    url += `&key=${GOOGLE_MAPS_API_KEY}`;
-    return url;
+    // 2. OpenStreetMap Static Maps fallback (zero API key required)
+    let osmMarkers = '';
+    if (markers.length > 0) {
+      osmMarkers = markers.map(m => `&markers=${m.lat},${m.lng},${m.color || 'red'}`).join('');
+    } else {
+      osmMarkers = `&markers=${centerLat},${centerLng},red`;
+    }
+
+    return `https://staticmap.openstreetmap.de/staticmap.php?center=${centerLat},${centerLng}&zoom=${zoom}&size=${width}x${height}&maptype=mapnik${osmMarkers}`;
   },
 
   // Open Google Maps turn-by-turn navigation directly

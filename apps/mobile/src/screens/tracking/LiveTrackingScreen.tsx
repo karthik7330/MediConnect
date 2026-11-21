@@ -2,10 +2,12 @@ import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ScrollView, Image } from 'react-native';
 import { ArrowLeft, Navigation, ShieldCheck, Hospital, Phone, Radio, ExternalLink, MapPin, CheckCircle2 } from 'lucide-react-native';
 import { theme } from '../../lib/theme';
+import { supabase } from '../../lib/supabase';
 import { STATUS_LABELS, EmergencyStatus } from '@mediconnect/shared';
 import { mapNavigationService } from '../../services/mapNavigationService';
 import { distanceService } from '../../services/distanceService';
 import { backgroundLocationService } from '../../services/backgroundLocationService';
+import { LiveMapCard } from '../../components/common/LiveMapCard';
 
 interface LiveTrackingScreenProps {
   emergencyId: string;
@@ -14,68 +16,160 @@ interface LiveTrackingScreenProps {
 }
 
 export const LiveTrackingScreen: React.FC<LiveTrackingScreenProps> = ({ emergencyId, userRole, onBack }) => {
-  const [currentStatus] = useState<EmergencyStatus>('AMBULANCE_ON_THE_WAY');
-  const [ambulanceSpeed, setAmbulanceSpeed] = useState(54);
-  const [patientCoords, setPatientCoords] = useState({ latitude: 13.0604, longitude: 80.2496 });
-  const [ambulanceCoords, setAmbulanceCoords] = useState({ latitude: 13.0720, longitude: 80.2610 });
+  const [currentStatus, setCurrentStatus] = useState<EmergencyStatus>('AMBULANCE_ON_THE_WAY');
+  const [ambulanceSpeed, setAmbulanceSpeed] = useState(48);
+  const [patientCoords, setPatientCoords] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [ambulanceCoords, setAmbulanceCoords] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [patientName, setPatientName] = useState('Citizen User');
+  const [assignedCrewId, setAssignedCrewId] = useState<string | null>(null);
 
-  // Calculate live geodesic distance using Haversine algorithm
-  const distanceKm = distanceService.calculateDistanceKm(patientCoords, ambulanceCoords);
-  const etaMinutes = distanceService.calculateEtaMinutes(distanceKm, ambulanceSpeed);
-
-  const hospitalLat = 13.0604;
-  const hospitalLng = 80.2505;
-
-  const hospitalName = 'Apollo Hospitals Greams Road (Level 1 Trauma)';
-  const hospitalAddress = '21 Greams Lane, Thousand Lights, Chennai';
-  const hospitalPhone = '+914428290200';
-  const hospitalBeds = 12;
-
-  // Real Google Maps Static Map URL
-  const googleMapStaticUrl = mapNavigationService.getStaticMapUrl({
-    centerLat: patientCoords.latitude,
-    centerLng: patientCoords.longitude,
-    zoom: 14,
-    width: 600,
-    height: 340,
-    markers: [
-      { lat: patientCoords.latitude, lng: patientCoords.longitude, color: 'red', label: 'P' },
-      { lat: ambulanceCoords.latitude, lng: ambulanceCoords.longitude, color: 'green', label: 'A' },
-      { lat: hospitalLat, lng: hospitalLng, color: 'blue', label: 'H' }
-    ]
+  const [hospitalInfo, setHospitalInfo] = useState({
+    name: 'Apollo Hospitals Greams Road (Level 1 Trauma)',
+    address: '21 Greams Lane, Thousand Lights, Chennai',
+    phone: '+914428290200',
+    beds: 12,
+    coords: { latitude: 13.0604, longitude: 80.2505 }
   });
 
-  // Continuous live GPS updates & dynamic telemetry simulation
+  // Calculate live geodesic distance using Haversine algorithm
+  const distanceKm = patientCoords && ambulanceCoords
+    ? distanceService.calculateDistanceKm(patientCoords, ambulanceCoords)
+    : 0;
+  const etaMinutes = distanceKm > 0
+    ? distanceService.calculateEtaMinutes(distanceKm, ambulanceSpeed)
+    : 0;
+
+  // 1. Fetch active emergency details and real coordinates
   useEffect(() => {
-    // 1. Continuous location watcher
-    let locationSub: any;
+    const fetchIncident = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('emergency_requests')
+          .select(`
+            *,
+            patient:profiles!emergency_requests_user_id_fkey(full_name),
+            hospital:hospitals!emergency_requests_selected_hospital_id_fkey(name, address, emergency_phone, icu_beds_available, location)
+          `)
+          .eq('id', emergencyId)
+          .single();
+
+        if (!error && data) {
+          if (data.current_status) setCurrentStatus(data.current_status);
+          if (data.patient?.full_name) setPatientName(data.patient.full_name);
+          if (data.assigned_ambulance_id) setAssignedCrewId(data.assigned_ambulance_id);
+
+          const parsedPatient = distanceService.parsePoint(data.user_location);
+          if (parsedPatient) setPatientCoords(parsedPatient);
+
+          if (data.hospital) {
+            const parsedHosp = distanceService.parsePoint(data.hospital.location);
+            setHospitalInfo({
+              name: data.hospital.name || 'Apollo Hospitals Greams Road',
+              address: data.hospital.address || '21 Greams Lane, Thousand Lights, Chennai',
+              phone: data.hospital.emergency_phone || '+914428290200',
+              beds: data.hospital.icu_beds_available ?? 12,
+              coords: parsedHosp || { latitude: 13.0604, longitude: 80.2505 }
+            });
+          }
+
+          // If ambulance accepted, fetch real ambulance coordinates
+          if (data.assigned_ambulance_id && data.current_status !== 'SOS_ACTIVATED') {
+            fetchAmbulanceLivePosition(data.assigned_ambulance_id, data.id);
+          }
+        }
+      } catch (err) {
+        console.warn('[LiveTrackingScreen] fetch incident error:', err);
+      }
+    };
+
+    const fetchAmbulanceLivePosition = async (crewId: string, emgId: string) => {
+      try {
+        const { data: track } = await supabase
+          .from('live_ambulance_tracking')
+          .select('current_location, speed_kmh')
+          .eq('emergency_id', emgId)
+          .maybeSingle();
+
+        if (track?.current_location) {
+          const parsed = distanceService.parsePoint(track.current_location);
+          if (parsed) setAmbulanceCoords(parsed);
+          if (track.speed_kmh) setAmbulanceSpeed(Math.round(Number(track.speed_kmh)));
+          return;
+        }
+
+        const { data: crew } = await supabase
+          .from('ambulance_crews')
+          .select('location')
+          .eq('id', crewId)
+          .single();
+
+        if (crew?.location) {
+          const parsed = distanceService.parsePoint(crew.location);
+          if (parsed) setAmbulanceCoords(parsed);
+        }
+      } catch (err) {
+        console.warn('[LiveTrackingScreen] fetch crew location error:', err);
+      }
+    };
+
+    fetchIncident();
+
+    // 2. Real-time updates subscription
+    const emgSub = supabase
+      .channel(`tracking_emg_${emergencyId}`)
+      .on('postgres_changes', {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'emergency_requests',
+        filter: `id=eq.${emergencyId}`
+      }, (payload) => {
+        if (payload.new) {
+          if (payload.new.current_status) setCurrentStatus(payload.new.current_status);
+          const pCoords = distanceService.parsePoint(payload.new.user_location);
+          if (pCoords) setPatientCoords(pCoords);
+          if (payload.new.assigned_ambulance_id) {
+            setAssignedCrewId(payload.new.assigned_ambulance_id);
+            if (payload.new.current_status !== 'SOS_ACTIVATED') {
+              fetchAmbulanceLivePosition(payload.new.assigned_ambulance_id, emergencyId);
+            }
+          }
+        }
+      })
+      .on('postgres_changes', {
+        event: '*',
+        schema: 'public',
+        table: 'live_ambulance_tracking',
+        filter: `emergency_id=eq.${emergencyId}`
+      }, (payload: any) => {
+        if (payload.new?.current_location) {
+          const parsed = distanceService.parsePoint(payload.new.current_location);
+          if (parsed) setAmbulanceCoords(parsed);
+          if (payload.new.speed_kmh) setAmbulanceSpeed(Math.round(Number(payload.new.speed_kmh)));
+        }
+      })
+      .subscribe();
+
+    // 3. Continuous device GPS watcher for the local role
+    let locationWatcher: any;
     backgroundLocationService.watchForegroundPosition((loc) => {
+      const livePoint = { latitude: loc.coords.latitude, longitude: loc.coords.longitude };
       if (userRole === 'AMBULANCE_PERSONNEL') {
-        setAmbulanceCoords({ latitude: loc.coords.latitude, longitude: loc.coords.longitude });
+        setAmbulanceCoords(livePoint);
         if (loc.coords.speed) setAmbulanceSpeed(Math.round(loc.coords.speed * 3.6));
       } else {
-        setPatientCoords({ latitude: loc.coords.latitude, longitude: loc.coords.longitude });
+        setPatientCoords(livePoint);
       }
     }).then(sub => {
-      locationSub = sub;
+      locationWatcher = sub;
     }).catch(err => {
       console.warn('[LiveTrackingScreen] watchPosition error:', err);
     });
 
-    // 2. Dynamic speed & approach interval
-    const interval = setInterval(() => {
-      setAmbulanceSpeed(prev => 48 + Math.floor(Math.random() * 10));
-      setAmbulanceCoords(prev => ({
-        latitude: prev.latitude - 0.0002,
-        longitude: prev.longitude - 0.0002
-      }));
-    }, 3000);
-
     return () => {
-      clearInterval(interval);
-      if (locationSub?.remove) locationSub.remove();
+      supabase.removeChannel(emgSub);
+      if (locationWatcher?.remove) locationWatcher.remove();
     };
-  }, [userRole]);
+  }, [emergencyId, userRole]);
 
   return (
     <View style={styles.container}>
@@ -94,56 +188,25 @@ export const LiveTrackingScreen: React.FC<LiveTrackingScreenProps> = ({ emergenc
         </View>
       </View>
 
-      {/* Real Google Maps Visual Canvas */}
-      <View style={styles.mapArea}>
-        <Image 
-          source={{ uri: googleMapStaticUrl }} 
-          style={styles.mapImage}
-          resizeMode="cover"
+      {/* Live Precision Satellite Map Canvas */}
+      <View style={{ paddingHorizontal: 16 }}>
+        <LiveMapCard
+          patientCoords={patientCoords}
+          ambulanceCoords={ambulanceCoords}
+          hospitalCoords={hospitalInfo.coords}
+          patientName={patientName}
+          ambulanceTitle="Ambulance Unit"
+          hospitalName={hospitalInfo.name}
+          statusLabel={STATUS_LABELS[currentStatus]}
+          onNavigatePatient={() => {
+            if (patientCoords) {
+              mapNavigationService.openNavigation(patientCoords.latitude, patientCoords.longitude, patientName);
+            }
+          }}
+          onNavigateHospital={() => {
+            mapNavigationService.openNavigation(hospitalInfo.coords.latitude, hospitalInfo.coords.longitude, hospitalInfo.name);
+          }}
         />
-
-        {/* Map Legend Floating Bar */}
-        <View style={styles.mapLegend}>
-          <View style={styles.legendItem}>
-            <View style={[styles.legendDot, { backgroundColor: '#DC2626' }]} />
-            <Text style={styles.legendText}>Patient (P)</Text>
-          </View>
-          <View style={styles.legendItem}>
-            <View style={[styles.legendDot, { backgroundColor: '#16A34A' }]} />
-            <Text style={styles.legendText}>Ambulance (A)</Text>
-          </View>
-          <View style={styles.legendItem}>
-            <View style={[styles.legendDot, { backgroundColor: '#0284C7' }]} />
-            <Text style={styles.legendText}>Hospital (H)</Text>
-          </View>
-        </View>
-
-        {/* Speed & ETA Tag */}
-        <View style={styles.floatingSpeedTag}>
-          <Navigation size={14} color="#FFFFFF" style={{ transform: [{ rotate: '45deg' }] }} />
-          <Text style={styles.floatingSpeedText}>{ambulanceSpeed} km/h • ETA {etaMinutes} min</Text>
-        </View>
-      </View>
-
-      {/* One-Touch Turn-by-Turn Google Maps Navigation Action */}
-      <View style={styles.quickNavRow}>
-        <TouchableOpacity 
-          style={styles.googleNavButton}
-          onPress={() => mapNavigationService.openNavigation(patientCoords.latitude, patientCoords.longitude, 'Patient Location')}
-        >
-          <Navigation size={16} color="#FFFFFF" style={{ marginRight: 6 }} />
-          <Text style={styles.googleNavButtonText}>
-            {userRole === 'AMBULANCE_PERSONNEL' ? 'Turn-by-Turn GPS to Patient' : 'Open in Google Maps'}
-          </Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity 
-          style={styles.hospitalNavButton}
-          onPress={() => mapNavigationService.openNavigation(hospitalLat, hospitalLng, hospitalName)}
-        >
-          <ExternalLink size={16} color="#FFFFFF" style={{ marginRight: 6 }} />
-          <Text style={styles.hospitalNavButtonText}>Route to Hospital</Text>
-        </TouchableOpacity>
       </View>
 
       {/* Bottom Live Metrics & Progression Details */}
@@ -156,17 +219,17 @@ export const LiveTrackingScreen: React.FC<LiveTrackingScreenProps> = ({ emergenc
           <View style={styles.metricsRow}>
             <View style={styles.metricItem}>
               <Text style={styles.metricLabel}>Distance</Text>
-              <Text style={styles.metricValue}>{distanceKm.toFixed(1)} km</Text>
+              <Text style={styles.metricValue}>{distanceKm > 0 ? `${distanceKm.toFixed(1)} km` : 'Calculating...'}</Text>
             </View>
             <View style={styles.metricDivider} />
             <View style={styles.metricItem}>
               <Text style={styles.metricLabel}>Estimated Arrival</Text>
-              <Text style={styles.metricValue}>{etaMinutes} min</Text>
+              <Text style={styles.metricValue}>{etaMinutes > 0 ? `${etaMinutes} min` : (ambulanceCoords ? '< 1 min' : 'Waiting...')}</Text>
             </View>
             <View style={styles.metricDivider} />
             <View style={styles.metricItem}>
               <Text style={styles.metricLabel}>Speed</Text>
-              <Text style={styles.metricValue}>{ambulanceSpeed} km/h</Text>
+              <Text style={styles.metricValue}>{ambulanceCoords ? `${ambulanceSpeed} km/h` : '0 km/h'}</Text>
             </View>
           </View>
         </View>
@@ -176,16 +239,16 @@ export const LiveTrackingScreen: React.FC<LiveTrackingScreenProps> = ({ emergenc
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
             <Hospital size={20} color="#0284C7" />
             <View style={{ flex: 1 }}>
-              <Text style={styles.hospTitle}>{hospitalName}</Text>
-              <Text style={styles.hospAddress}>{hospitalAddress} • {hospitalBeds} ICU Beds</Text>
+              <Text style={styles.hospTitle}>{hospitalInfo.name}</Text>
+              <Text style={styles.hospAddress}>{hospitalInfo.address} • {hospitalInfo.beds} ICU Beds</Text>
             </View>
           </View>
           <TouchableOpacity 
             style={styles.hospCallBtn}
-            onPress={() => mapNavigationService.makePhoneCall(hospitalPhone, hospitalName)}
+            onPress={() => mapNavigationService.makePhoneCall(hospitalInfo.phone, hospitalInfo.name)}
           >
             <Phone size={14} color="#0369A1" style={{ marginRight: 6 }} />
-            <Text style={styles.hospCallBtnText}>Call Trauma Bay ({hospitalPhone})</Text>
+            <Text style={styles.hospCallBtnText}>Call Trauma Bay ({hospitalInfo.phone})</Text>
           </TouchableOpacity>
         </View>
 

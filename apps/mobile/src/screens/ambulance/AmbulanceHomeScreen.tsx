@@ -24,6 +24,7 @@ import { notificationService } from '../../services/notificationService';
 import { backgroundLocationService } from '../../services/backgroundLocationService';
 import { distanceService } from '../../services/distanceService';
 import { supabase } from '../../lib/supabase';
+import { LiveMapCard } from '../../components/common/LiveMapCard';
 import * as Location from 'expo-location';
 
 interface AmbulanceHomeScreenProps {
@@ -285,11 +286,86 @@ export const AmbulanceHomeScreen: React.FC<AmbulanceHomeScreenProps> = ({
       setCountdown(isAdminOverride ? 120 : 60);
     };
 
+    // Directly restore an in-progress active emergency assignment
+    const restoreActiveEmergency = async (req: any) => {
+      const pCoords = distanceService.parsePoint(req.user_location) || crewLocationRef.current;
+      const orderIdx = EMERGENCY_STATUS_ORDER.indexOf(req.current_status);
+
+      let patientName = 'Citizen Emergency';
+      let patientPhone = '+919876543210';
+      let patientBlood = 'O+';
+      let patientNotes = 'Immediate assistance requested';
+
+      if (req.user_id) {
+        const { data: pData } = await supabase
+          .from('profiles')
+          .select('full_name, phone_number, blood_group, medical_notes')
+          .eq('id', req.user_id)
+          .single();
+
+        if (pData) {
+          patientName = pData.full_name || patientName;
+          patientPhone = pData.phone_number || patientPhone;
+          patientBlood = pData.blood_group || patientBlood;
+          patientNotes = pData.medical_notes || patientNotes;
+        }
+      }
+
+      let contactName = 'Family Contact';
+      let contactPhone = '+919876543212';
+      if (req.user_id) {
+        const { data: cData } = await supabase
+          .from('emergency_contacts')
+          .select('contact_name, contact_user_id')
+          .eq('user_id', req.user_id)
+          .limit(1)
+          .maybeSingle();
+
+        if (cData) {
+          contactName = cData.contact_name || contactName;
+          if (cData.contact_user_id) {
+            const { data: cProfile } = await supabase
+              .from('profiles')
+              .select('phone_number')
+              .eq('id', cData.contact_user_id)
+              .single();
+            if (cProfile) contactPhone = cProfile.phone_number || contactPhone;
+          }
+        }
+      }
+
+      setAvailability('BUSY');
+      setActiveEmergency({
+        id: req.id,
+        statusIndex: orderIdx >= 0 ? orderIdx : 1,
+        patientName,
+        patientPhone,
+        patientBlood,
+        patientNotes,
+        contactName,
+        contactPhone,
+        hospitalName: 'Apollo Hospitals Greams Road (Level 1 Trauma)',
+        hospitalAddress: '21 Greams Lane, Thousand Lights, Chennai',
+        hospitalPhone: '+914428290200',
+        patientLat: pCoords.latitude,
+        patientLng: pCoords.longitude,
+        hospitalLat: 13.0604,
+        hospitalLng: 80.2505
+      });
+      setIncomingOffer(null);
+
+      await backgroundLocationService.startTracking({
+        incidentId: req.id,
+        role: 'AMBULANCE_PERSONNEL',
+        userId: crewId
+      });
+    };
+
     // Query for any active emergency request matching this crew
     const checkExisting = async () => {
       const fifteenMinutesAgo = new Date(Date.now() - 15 * 60 * 1000).toISOString();
 
-      // 1. Check for active emergency directly assigned to this crew (e.g. Admin Override)
+      // 1. Check for active emergency directly assigned to this crew
       const { data: directData } = await supabase
         .from('emergency_requests')
         .select('*')
@@ -299,7 +375,12 @@ export const AmbulanceHomeScreen: React.FC<AmbulanceHomeScreenProps> = ({
         .limit(1);
 
       if (directData && directData.length > 0) {
-        processIncomingRequest(directData[0]);
+        const req = directData[0];
+        if (req.current_status !== 'SOS_ACTIVATED') {
+          restoreActiveEmergency(req);
+        } else {
+          processIncomingRequest(req);
+        }
         return;
       }
 
@@ -327,8 +408,18 @@ export const AmbulanceHomeScreen: React.FC<AmbulanceHomeScreenProps> = ({
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'emergency_requests' },
-        (payload) => {
+        (payload: any) => {
           if (payload.new) {
+            if (activeEmergencyRef.current?.id === payload.new.id) {
+              const updatedCoords = distanceService.parsePoint(payload.new.user_location);
+              if (updatedCoords) {
+                setActiveEmergency(prev => prev ? {
+                  ...prev,
+                  patientLat: updatedCoords.latitude,
+                  patientLng: updatedCoords.longitude
+                } : null);
+              }
+            }
             processIncomingRequest(payload.new);
           }
         }
@@ -631,49 +722,19 @@ export const AmbulanceHomeScreen: React.FC<AmbulanceHomeScreenProps> = ({
           </View>
 
           {/* ================================================================ */}
-          {/* 3. GOOGLE MAPS NAVIGATION VIEW & ONE-TAP ROUTING                */}
+          {/* 3. LIVE PRECISION SATELLITE MAP CARD (Guaranteed No Blank Screen)*/}
           {/* ================================================================ */}
-          <View style={styles.mapContainer}>
-            <Image 
-              source={{ uri: googleMapStaticUrl }} 
-              style={styles.mapImage}
-              resizeMode="cover"
-            />
-            {/* Map Legend */}
-            <View style={styles.mapLegend}>
-              <View style={styles.legendItem}>
-                <View style={[styles.legendDot, { backgroundColor: '#DC2626' }]} />
-                <Text style={styles.legendText}>Patient (P)</Text>
-              </View>
-              <View style={styles.legendItem}>
-                <View style={[styles.legendDot, { backgroundColor: '#16A34A' }]} />
-                <Text style={styles.legendText}>Ambulance (A)</Text>
-              </View>
-              <View style={styles.legendItem}>
-                <View style={[styles.legendDot, { backgroundColor: '#0284C7' }]} />
-                <Text style={styles.legendText}>Hospital (H)</Text>
-              </View>
-            </View>
-          </View>
-
-          {/* Direct Google Maps Turn-by-Turn GPS Navigation Buttons */}
-          <View style={styles.navRow}>
-            <TouchableOpacity 
-              style={styles.navPatientBtn}
-              onPress={() => mapNavigationService.openNavigation(activeEmergency.patientLat, activeEmergency.patientLng, 'Patient Location')}
-            >
-              <Navigation size={16} color="#FFFFFF" style={{ marginRight: 6 }} />
-              <Text style={styles.navPatientBtnText}>Turn-by-Turn Navigation to Patient</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity 
-              style={styles.navHospitalBtn}
-              onPress={() => mapNavigationService.openNavigation(activeEmergency.hospitalLat, activeEmergency.hospitalLng, activeEmergency.hospitalName)}
-            >
-              <ExternalLink size={16} color="#FFFFFF" style={{ marginRight: 6 }} />
-              <Text style={styles.navHospitalBtnText}>Route to Trauma Hospital</Text>
-            </TouchableOpacity>
-          </View>
+          <LiveMapCard
+            patientCoords={{ latitude: activeEmergency.patientLat, longitude: activeEmergency.patientLng }}
+            ambulanceCoords={crewLocation}
+            hospitalCoords={{ latitude: activeEmergency.hospitalLat, longitude: activeEmergency.hospitalLng }}
+            patientName={activeEmergency.patientName}
+            ambulanceTitle="This Ambulance"
+            hospitalName={activeEmergency.hospitalName}
+            statusLabel={STATUS_LABELS[currentStatus]}
+            onNavigatePatient={() => mapNavigationService.openNavigation(activeEmergency.patientLat, activeEmergency.patientLng, activeEmergency.patientName)}
+            onNavigateHospital={() => mapNavigationService.openNavigation(activeEmergency.hospitalLat, activeEmergency.hospitalLng, activeEmergency.hospitalName)}
+          />
 
           {/* Advance Step Action Button */}
           <TouchableOpacity style={styles.advanceButton} onPress={handleNextStatus}>

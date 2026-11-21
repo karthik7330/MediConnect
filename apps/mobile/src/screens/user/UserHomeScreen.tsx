@@ -11,6 +11,7 @@ import { notificationService } from '../../services/notificationService';
 import { backgroundLocationService } from '../../services/backgroundLocationService';
 import { firebaseService } from '../../services/firebaseService';
 import { distanceService } from '../../services/distanceService';
+import { LiveMapCard } from '../../components/common/LiveMapCard';
 import { Profile } from '@mediconnect/shared';
 
 interface UserHomeScreenProps {
@@ -142,20 +143,45 @@ export const UserHomeScreen: React.FC<UserHomeScreenProps> = ({
 
       setLastCoords({ lat: coords.latitude, lng: coords.longitude });
 
-      // 2. Trigger SOS via live API with automatic offline queue fallback
+      // 2. Perform Real High-Precision Reverse Geocoding
+      let detectedAddress = `GPS (${coords.latitude.toFixed(5)}, ${coords.longitude.toFixed(5)})`;
+      try {
+        const geocoded = await Location.reverseGeocodeAsync({
+          latitude: coords.latitude,
+          longitude: coords.longitude
+        });
+        if (geocoded && geocoded.length > 0) {
+          const place = geocoded[0];
+          const parts = [
+            place.name,
+            place.street,
+            place.subregion || place.district,
+            place.city,
+            place.region,
+            place.postalCode
+          ].filter(Boolean);
+          if (parts.length > 0) {
+            detectedAddress = parts.join(', ');
+          }
+        }
+      } catch (geoErr) {
+        console.warn('[UserHomeScreen] Reverse geocode fallback:', geoErr);
+      }
+
+      // 3. Trigger SOS via live API with automatic offline queue fallback
       const activeUserId = userProfile?.id || '44444444-4444-4444-4444-444444444444';
-      const result = await emergencyService.triggerSos(activeUserId, coords, 'Live GPS Incident Location');
+      const result = await emergencyService.triggerSos(activeUserId, coords, detectedAddress);
 
       if (result.success && result.emergencyId) {
         setIsOfflineMode(result.isOffline || false);
         setActiveEmergencyId(result.emergencyId);
         setEmergencyStatus(result.isOffline ? 'QUEUED_OFFLINE' : 'SOS_ACTIVATED');
 
-        // 3. Dispatch High-Priority SOS Push Notification
+        // 4. Dispatch High-Priority SOS Push Notification with Real Address
         await notificationService.dispatchSosAlert({
           emergencyId: result.emergencyId,
           patientName: userProfile?.fullName || 'Citizen User',
-          locationText: 'Live GPS Coordinates'
+          locationText: detectedAddress
         });
 
         // 4. Start Android Foreground Service & Background Continuous GPS Tracking
@@ -282,46 +308,22 @@ export const UserHomeScreen: React.FC<UserHomeScreenProps> = ({
             </View>
           )}
 
-          {/* Live Google Map View for Citizen */}
+          {/* Live Precision Satellite Map Card */}
           {lastCoords && (
-            <View style={styles.googleMapBox}>
-              <Image 
-                source={{
-                  uri: mapNavigationService.getStaticMapUrl({
-                    centerLat: lastCoords.lat,
-                    centerLng: lastCoords.lng,
-                    zoom: 14,
-                    width: 600,
-                    height: 280,
-                    markers: [
-                      { lat: lastCoords.lat, lng: lastCoords.lng, color: 'red', label: 'P' },
-                      ...(assignedCrew && assignedCrew.ambulanceLat && assignedCrew.ambulanceLng ? [
-                        { lat: assignedCrew.ambulanceLat, lng: assignedCrew.ambulanceLng, color: 'green', label: 'A' }
-                      ] : []),
-                      { lat: 13.0604, lng: 80.2505, color: 'blue', label: 'H' }
-                    ]
-                  })
-                }} 
-                style={styles.googleMapImage}
-                resizeMode="cover"
-              />
-              <View style={styles.mapLegendOverlay}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                  <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#DC2626' }} />
-                  <Text style={styles.legendText}>You (P)</Text>
-                </View>
-                {assignedCrew && (
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                    <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#10B981' }} />
-                    <Text style={styles.legendText}>Ambulance (A)</Text>
-                  </View>
-                )}
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                  <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#0284C7' }} />
-                  <Text style={styles.legendText}>Apollo Trauma (H)</Text>
-                </View>
-              </View>
-            </View>
+            <LiveMapCard
+              patientCoords={{ latitude: lastCoords.lat, longitude: lastCoords.lng }}
+              ambulanceCoords={assignedCrew?.ambulanceLat && assignedCrew?.ambulanceLng ? {
+                latitude: assignedCrew.ambulanceLat,
+                longitude: assignedCrew.ambulanceLng
+              } : null}
+              hospitalCoords={{ latitude: 13.0604, longitude: 80.2505 }}
+              patientName="My Emergency Location"
+              ambulanceTitle={assignedCrew ? assignedCrew.vehicleNumber : undefined}
+              hospitalName="Apollo Hospitals Greams Road"
+              statusLabel={emergencyStatus || 'SOS_ACTIVATED'}
+              onNavigatePatient={() => mapNavigationService.openNavigation(lastCoords.lat, lastCoords.lng, 'My Emergency Location')}
+              onNavigateHospital={() => mapNavigationService.openNavigation(13.0604, 80.2505, 'Apollo Trauma Center')}
+            />
           )}
 
           {/* Quick Action Navigation & Dialer Buttons */}

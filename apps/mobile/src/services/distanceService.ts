@@ -1,12 +1,11 @@
 /**
  * MediConnect Precision Distance & Telemetry Engine
- * Implements real-time Haversine geodesic distance and dynamic ETA computation.
+ * Implements real-time Haversine geodesic distance, dynamic ETA computation,
+ * and universal PostGIS EWKB / WKT / GeoJSON coordinate parsing.
  */
+import { parseCoordinates, LatLng } from '@mediconnect/shared';
 
-export interface LatLng {
-  latitude: number;
-  longitude: number;
-}
+export type { LatLng };
 
 export const distanceService = {
   /**
@@ -67,29 +66,10 @@ export const distanceService = {
   },
 
   /**
-   * Safely parses coordinates from PostGIS GeoJSON, WKT string (e.g. 'POINT(lng lat)'), or object.
+   * Safely parses coordinates from PostGIS EWKB hex, GeoJSON, WKT string ('POINT(lng lat)'), or object.
    */
   parsePoint(loc: any): LatLng | null {
-    if (!loc) return null;
-    if (typeof loc === 'object') {
-      if (Array.isArray(loc.coordinates) && loc.coordinates.length >= 2) {
-        // GeoJSON uses [longitude, latitude]
-        return { longitude: Number(loc.coordinates[0]), latitude: Number(loc.coordinates[1]) };
-      }
-      if (typeof loc.latitude === 'number' && typeof loc.longitude === 'number') {
-        return { latitude: loc.latitude, longitude: loc.longitude };
-      }
-      if (typeof loc.lat === 'number' && typeof loc.lng === 'number') {
-        return { latitude: loc.lat, longitude: loc.lng };
-      }
-    }
-    if (typeof loc === 'string') {
-      const match = loc.match(/POINT\s*\(\s*([-\d.]+)\s+([-\d.]+)\s*\)/i);
-      if (match) {
-        return { longitude: parseFloat(match[1]), latitude: parseFloat(match[2]) };
-      }
-    }
-    return null;
+    return parseCoordinates(loc);
   },
 
   toRadians(degrees: number): number {

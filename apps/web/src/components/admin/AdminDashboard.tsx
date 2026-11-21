@@ -22,7 +22,7 @@ import {
   RefreshCw 
 } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
-import { Profile } from '@mediconnect/shared';
+import { Profile, parseCoordinates } from '@mediconnect/shared';
 
 interface AdminDashboardProps {
   currentProfile: Profile;
@@ -121,11 +121,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
           let coords: { lat: number; lng: number } | null = null;
           if (call.user_location) {
-            if (typeof call.user_location === 'string') {
-              const m = call.user_location.match(/POINT\s*\(\s*([-\d.]+)\s+([-\d.]+)\s*\)/i);
-              if (m) coords = { lng: parseFloat(m[1]), lat: parseFloat(m[2]) };
-            } else if (call.user_location.coordinates && Array.isArray(call.user_location.coordinates)) {
-              coords = { lng: Number(call.user_location.coordinates[0]), lat: Number(call.user_location.coordinates[1]) };
+            const parsed = parseCoordinates(call.user_location);
+            if (parsed) {
+              coords = { lat: parsed.latitude, lng: parsed.longitude };
             }
           }
 
