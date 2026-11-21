@@ -118,7 +118,13 @@ export const UserHomeScreen: React.FC<UserHomeScreenProps> = ({
       }
     });
 
+    // Auto-sync polling every 2.5s to ensure live status and responder movement updates
+    const liveSyncTimer = setInterval(() => {
+      checkInitial();
+    }, 2500);
+
     return () => {
+      clearInterval(liveSyncTimer);
       unsubscribe();
     };
   }, [activeEmergencyId, isOfflineMode, lastCoords]);

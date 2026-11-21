@@ -104,34 +104,98 @@ export const AmbulanceHomeScreen: React.FC<AmbulanceHomeScreenProps> = ({
 
   const crewId = userProfile?.id || '33333333-3333-3333-3333-333333333333';
 
-  // 1. Capture live paramedic GPS coordinates and update availability in database
+  // 1. Continuous Live GPS Telemetry Watcher for Ambulance Driver (Zero Fake Data)
   useEffect(() => {
-    const syncCrewLocation = async () => {
+    let watcherSub: Location.LocationSubscription | null = null;
+    let isActive = true;
+
+    const startContinuousDriverTracking = async () => {
       try {
         const { status } = await Location.requestForegroundPermissionsAsync();
-        if (status === 'granted') {
-          const loc = await Location.getCurrentPositionAsync({
-            accuracy: Location.Accuracy.Balanced
-          });
-          const coords = { latitude: loc.coords.latitude, longitude: loc.coords.longitude };
-          setCrewLocation(coords);
-
-          await supabase.from('ambulance_crews').upsert({
-            id: crewId,
-            vehicle_number: userProfile?.fullName ? `TN-01-AMB-${crewId.slice(0, 4).toUpperCase()}` : 'TN-01-AMB-4091',
-            license_number: 'PARA-TN-2026-994',
-            availability: availability,
-            is_approved: true,
-            location: `POINT(${coords.longitude} ${coords.latitude})`,
-            last_location_update: new Date().toISOString()
-          });
+        if (status !== 'granted') {
+          console.warn('[AmbulanceHomeScreen] Foreground location permission not granted');
+          return;
         }
+
+        // 1. Immediate initial GPS fix
+        const initialLoc = await Location.getCurrentPositionAsync({
+          accuracy: Location.Accuracy.Highest
+        });
+        if (!isActive) return;
+
+        const initialCoords = {
+          latitude: initialLoc.coords.latitude,
+          longitude: initialLoc.coords.longitude
+        };
+        setCrewLocation(initialCoords);
+        crewLocationRef.current = initialCoords;
+
+        await supabase.from('ambulance_crews').upsert({
+          id: crewId,
+          vehicle_number: userProfile?.fullName ? `TN-01-AMB-${crewId.slice(0, 4).toUpperCase()}` : 'TN-01-AMB-4091',
+          license_number: 'PARA-TN-2026-994',
+          availability: availability,
+          is_approved: true,
+          location: `POINT(${initialCoords.longitude} ${initialCoords.latitude})`,
+          last_location_update: new Date().toISOString()
+        });
+
+        // 2. Continuous real-time GPS telemetry watcher (every 2s or 1 meter)
+        watcherSub = await Location.watchPositionAsync(
+          {
+            accuracy: Location.Accuracy.Highest,
+            timeInterval: 2000,
+            distanceInterval: 1
+          },
+          async (loc) => {
+            if (!isActive) return;
+
+            const liveCoords = {
+              latitude: loc.coords.latitude,
+              longitude: loc.coords.longitude
+            };
+            setCrewLocation(liveCoords);
+            crewLocationRef.current = liveCoords;
+
+            const speedKmh = loc.coords.speed ? Math.round(loc.coords.speed * 3.6) : 48;
+            const heading = loc.coords.heading ?? 0;
+
+            // Stream moving coordinates directly to ambulance_crews
+            await supabase
+              .from('ambulance_crews')
+              .update({
+                location: `POINT(${liveCoords.longitude} ${liveCoords.latitude})`,
+                last_location_update: new Date().toISOString()
+              })
+              .eq('id', crewId);
+
+            // If active emergency is in progress, stream directly to live_ambulance_tracking
+            if (activeEmergencyRef.current?.id) {
+              await supabase
+                .from('live_ambulance_tracking')
+                .upsert({
+                  emergency_id: activeEmergencyRef.current.id,
+                  ambulance_id: crewId,
+                  current_location: `POINT(${liveCoords.longitude} ${liveCoords.latitude})`,
+                  speed_kmh: speedKmh,
+                  heading: heading,
+                  updated_at: new Date().toISOString(),
+                  is_active: true
+                });
+            }
+          }
+        );
       } catch (err) {
-        console.warn('[AmbulanceHomeScreen] Location sync warning:', err);
+        console.warn('[AmbulanceHomeScreen] Continuous tracking error:', err);
       }
     };
 
-    syncCrewLocation();
+    startContinuousDriverTracking();
+
+    return () => {
+      isActive = false;
+      if (watcherSub?.remove) watcherSub.remove();
+    };
   }, [crewId, availability, userProfile]);
 
   // 2. Real-time listening for incoming emergency requests from Citizen SOS and Admin Manual Override

@@ -167,17 +167,36 @@ export const ContactHomeScreen: React.FC<ContactHomeScreenProps> = ({
     loadRequestsAndConnections();
     fetchActiveEmergency();
 
-    // Live subscription for Emergency Incidents
+    // 1. Live subscription for Emergency Incidents
+    const channelId = `contact_feed_${Date.now()}`;
     const emergencyChannel = supabase
-      .channel('contact_live_feed')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'emergency_requests' }, () => {
+      .channel(channelId)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'emergency_requests' }, (payload: any) => {
+        if (payload.new) {
+          // Immediately apply new status to UI without waiting
+          setActiveEmergency((prev: any) => {
+            if (!prev || prev.id === payload.new.id) {
+              return {
+                ...prev,
+                ...payload.new,
+                patient: prev?.patient,
+                hospital: prev?.hospital
+              };
+            }
+            return prev;
+          });
+
+          if (payload.new.assigned_ambulance_id && payload.new.current_status !== 'SOS_ACTIVATED') {
+            fetchAmbulanceTelemetry(payload.new.assigned_ambulance_id, payload.new.id);
+          }
+        }
         fetchActiveEmergency();
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'live_ambulance_tracking' }, (payload: any) => {
-        if (payload.new) {
+        if (payload.new?.current_location) {
           const parsed = distanceService.parsePoint(payload.new.current_location);
           if (parsed) {
-            setAssignedAmbulance(prev => prev ? {
+            setAssignedAmbulance((prev: any) => prev ? {
               ...prev,
               coords: parsed,
               speedKmh: payload.new.speed_kmh ? Number(payload.new.speed_kmh) : prev.speedKmh
@@ -186,24 +205,31 @@ export const ContactHomeScreen: React.FC<ContactHomeScreenProps> = ({
         }
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'ambulance_crews' }, (payload: any) => {
-        if (payload.new) {
+        if (payload.new?.location) {
           const parsed = distanceService.parsePoint(payload.new.location);
           if (parsed) {
-            setAssignedAmbulance(prev => prev ? { ...prev, coords: parsed } : null);
+            setAssignedAmbulance((prev: any) => prev ? { ...prev, coords: parsed } : null);
           }
         }
       })
       .subscribe();
 
-    // Live subscription for Connection Requests
+    // 2. Live subscription for Connection Requests
+    const reqChannelId = `contact_reqs_${Date.now()}`;
     const requestsChannel = supabase
-      .channel('contact_requests_feed')
+      .channel(reqChannelId)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'connection_requests' }, () => {
         loadRequestsAndConnections();
       })
       .subscribe();
 
+    // 3. Guaranteed auto-sync timer every 2.5 seconds: ensures status & live coordinates update automatically without re-login!
+    const autoSyncTimer = setInterval(() => {
+      fetchActiveEmergency();
+    }, 2500);
+
     return () => {
+      clearInterval(autoSyncTimer);
       supabase.removeChannel(emergencyChannel);
       supabase.removeChannel(requestsChannel);
     };
@@ -287,16 +313,28 @@ export const ContactHomeScreen: React.FC<ContactHomeScreenProps> = ({
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       {/* Top Header */}
       <View style={styles.header}>
-        <View>
+        <View style={{ flex: 1 }}>
           <Text style={styles.greeting}>Family Contact Portal</Text>
           <Text style={styles.roleTag}>
             {userProfile?.fullName || 'Emergency Contact'} • {contactPhone || 'Live Monitor'}
           </Text>
         </View>
-        <TouchableOpacity style={styles.switchButton} onPress={onSwitchRole}>
-          <LogOut size={16} color={theme.colors.accent} />
-          <Text style={styles.switchButtonText}>Sign Out</Text>
-        </TouchableOpacity>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+          <TouchableOpacity
+            style={[styles.switchButton, { backgroundColor: '#F1F5F9', borderColor: '#CBD5E1' }]}
+            onPress={() => {
+              fetchActiveEmergency();
+              loadRequestsAndConnections();
+            }}
+          >
+            <RefreshCw size={14} color="#0F172A" />
+            <Text style={[styles.switchButtonText, { color: '#0F172A' }]}>Sync</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.switchButton} onPress={onSwitchRole}>
+            <LogOut size={14} color={theme.colors.accent} />
+            <Text style={styles.switchButtonText}>Sign Out</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       {/* ==================================================================== */}
