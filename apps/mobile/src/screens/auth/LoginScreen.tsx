@@ -112,10 +112,12 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
             style={[styles.roleTab, role === r && styles.roleTabActive]}
             onPress={() => {
               setRole(r);
-              if (r === 'MAIN_ADMIN') setIdentifier('vallikarthik7330@gmail.com');
-              else if (r === 'EMERGENCY_CONTACT') setIdentifier('+919876543212');
-              else if (r === 'AMBULANCE_PERSONNEL') setIdentifier('+919876543211');
-              else setIdentifier('+919876543213');
+              if (r === 'MAIN_ADMIN') {
+                setIdentifier('vallikarthik7330@gmail.com');
+              } else {
+                setIdentifier('');
+              }
+              setPassword('');
             }}
           >
             <Text style={[styles.roleTabText, role === r && styles.roleTabTextActive]}>
@@ -157,7 +159,11 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
             placeholder={
               role === 'EMERGENCY_CONTACT'
                 ? 'Registered Mobile Number (Required)'
-                : 'Email or Mobile Number'
+                : role === 'NORMAL_USER'
+                  ? 'Registered Mobile or Email'
+                  : role === 'AMBULANCE_PERSONNEL'
+                    ? 'Registered Paramedic Mobile or Email'
+                    : 'Administrator Email'
             }
             placeholderTextColor={theme.colors.textMuted}
             keyboardType={role === 'EMERGENCY_CONTACT' ? 'phone-pad' : 'default'}

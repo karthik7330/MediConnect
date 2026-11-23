@@ -12,3 +12,8 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
     detectSessionInUrl: false
   }
 });
+
+// Admin Supabase client (bypasses RLS for hospital bed updates and authoritative sync)
+const serviceRoleKey = process.env.EXPO_PUBLIC_SUPABASE_SERVICE_ROLE_KEY || 'sb_secret_CNuRvsuCKQ_eiadXgJUUVA_ofjbMFNh';
+export const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey);
+

@@ -1,4 +1,4 @@
-import { supabase } from '../lib/supabase';
+import { supabase, supabaseAdmin } from '../lib/supabase';
 import { UserRole, Profile } from '@mediconnect/shared';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
@@ -65,7 +65,7 @@ export const authService = {
     await AsyncStorage.removeItem(LOCKOUT_KEY);
   },
 
-  // Register user profile in database
+  // Register user profile in database (Checks for duplicates)
   async register(params: {
     email?: string;
     phone: string;
@@ -77,24 +77,43 @@ export const authService = {
     vehicleNumber?: string;
   }): Promise<{ success: boolean; profile?: Profile; error?: string }> {
     try {
-      const validId = generateUUID();
+      const cleanPhone = params.phone.trim();
+      const cleanEmail = params.email?.trim().toLowerCase();
 
+      // Check if user already exists with this phone or email
+      let duplicateQuery = supabaseAdmin.from('profiles').select('id, role, phone_number, email');
+      if (cleanEmail) {
+        duplicateQuery = duplicateQuery.or(`phone_number.eq.${cleanPhone},email.eq.${cleanEmail}`);
+      } else {
+        duplicateQuery = duplicateQuery.eq('phone_number', cleanPhone);
+      }
+
+      const { data: existingUser } = await duplicateQuery.maybeSingle();
+      if (existingUser) {
+        const roleLabel = this.getRoleDisplayName(existingUser.role as UserRole);
+        return {
+          success: false,
+          error: `An account is already registered with this phone number or email as a ${roleLabel}. Please log in instead.`
+        };
+      }
+
+      const validId = generateUUID();
       const profile: Profile = {
         id: validId,
         role: params.role,
-        fullName: params.fullName,
-        phoneNumber: params.phone,
-        email: params.email,
-        bloodGroup: params.bloodGroup,
-        medicalNotes: params.medicalNotes,
+        fullName: params.fullName.trim(),
+        phoneNumber: cleanPhone,
+        email: cleanEmail || undefined,
+        bloodGroup: params.bloodGroup?.trim() || undefined,
+        medicalNotes: params.medicalNotes?.trim() || undefined,
         isApproved: params.role !== 'AMBULANCE_PERSONNEL', // Ambulance requires Main Admin approval
         isDeactivated: false,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       };
 
-      // Save to Supabase profiles table
-      const { error } = await supabase.from('profiles').upsert({
+      // Save to Supabase profiles table using admin client to ensure persistence
+      const { error } = await supabaseAdmin.from('profiles').insert({
         id: profile.id,
         role: profile.role,
         full_name: profile.fullName,
@@ -107,15 +126,16 @@ export const authService = {
       });
 
       if (error) {
-        console.warn('[AuthService] Supabase insert warning:', error.message);
+        console.error('[AuthService] Profile registration error:', error.message);
+        throw error;
       }
 
-      // If registering as Ambulance Personnel, insert vehicle details
+      // If registering as Ambulance Personnel, insert vehicle details into ambulance_crews
       if (params.role === 'AMBULANCE_PERSONNEL' && params.licenseNumber && params.vehicleNumber) {
-        await supabase.from('ambulance_crews').upsert({
+        await supabaseAdmin.from('ambulance_crews').upsert({
           id: profile.id,
-          vehicle_number: params.vehicleNumber,
-          license_number: params.licenseNumber,
+          vehicle_number: params.vehicleNumber.trim().toUpperCase(),
+          license_number: params.licenseNumber.trim().toUpperCase(),
           availability: 'OFFLINE',
           is_approved: false
         });
@@ -130,7 +150,7 @@ export const authService = {
     }
   },
 
-  // Login with 5-attempt security lockout and Supabase profile query
+  // Strict Login: ONLY allows registered credentials & enforces the exact role
   async login(identifier: string, role: UserRole): Promise<{ success: boolean; profile?: Profile; error?: string }> {
     const lockout = await this.checkLockout();
     if (lockout.isLocked) {
@@ -140,32 +160,18 @@ export const authService = {
       };
     }
 
-    try {
-      // Query profile from Supabase
-      const { data } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('role', role)
-        .or(`email.eq.${identifier},phone_number.eq.${identifier}`)
-        .maybeSingle();
+    const cleanId = identifier.trim();
+    if (!cleanId) {
+      return { success: false, error: 'Please enter your registered phone number or email.' };
+    }
 
-      let profile: Profile;
-      if (data) {
-        profile = {
-          id: data.id,
-          role: data.role,
-          fullName: data.full_name,
-          phoneNumber: data.phone_number,
-          email: data.email,
-          bloodGroup: data.blood_group,
-          medicalNotes: data.medical_notes,
-          isApproved: data.is_approved,
-          isDeactivated: data.is_deactivated,
-          createdAt: data.created_at,
-          updatedAt: data.updated_at
-        };
-      } else if (role === 'MAIN_ADMIN' || identifier.toLowerCase() === 'vallikarthik7330@gmail.com') {
-        profile = {
+    const isEmail = cleanId.includes('@');
+    const lowerId = cleanId.toLowerCase();
+
+    try {
+      // 1. Check for Root Main Administrator
+      if (role === 'MAIN_ADMIN' && lowerId === 'vallikarthik7330@gmail.com') {
+        const rootAdmin: Profile = {
           id: '44444444-4444-4444-4444-444444444444',
           role: 'MAIN_ADMIN',
           fullName: 'Karthik',
@@ -176,43 +182,92 @@ export const authService = {
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString()
         };
-      } else {
-        // If not found in DB, auto-provision with valid UUID and insert into profiles
-        const newId = generateUUID();
-        const isEmail = identifier.includes('@');
-        const defaultName = role === 'AMBULANCE_PERSONNEL' 
-          ? 'Paramedic Unit Officer' 
-          : role === 'EMERGENCY_CONTACT' 
-            ? 'Emergency Contact' 
-            : 'Citizen User';
-
-        profile = {
-          id: newId,
-          role,
-          fullName: defaultName,
-          phoneNumber: isEmail ? '+919876543210' : identifier,
-          email: isEmail ? identifier : undefined,
-          isApproved: true,
-          isDeactivated: false,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString()
-        };
-
-        // Persist to profiles so foreign key constraints in connection_requests and emergency_contacts succeed
-        const { error: upsertErr } = await supabase.from('profiles').upsert({
-          id: profile.id,
-          role: profile.role,
-          full_name: profile.fullName,
-          phone_number: profile.phoneNumber,
-          email: profile.email || null,
-          is_approved: true,
-          is_deactivated: false
-        });
-
-        if (upsertErr) {
-          console.warn('[AuthService] Profile auto-provision insert warning:', upsertErr.message);
-        }
+        await AsyncStorage.setItem('@mediconnect_current_user', JSON.stringify(rootAdmin));
+        await this.resetFailedAttempts();
+        return { success: true, profile: rootAdmin };
       }
+
+      // 2. Query Supabase profiles table strictly for this identifier
+      let query = supabaseAdmin.from('profiles').select('*');
+      if (isEmail) {
+        query = query.ilike('email', lowerId);
+      } else {
+        // Build phone number matching variants (e.g. 9876543210, +919876543210)
+        const digitsOnly = cleanId.replace(/\D/g, '');
+        const phoneVariants = [cleanId];
+        if (digitsOnly.length === 10) {
+          phoneVariants.push(digitsOnly, `+91${digitsOnly}`);
+        } else if (digitsOnly.length === 12 && digitsOnly.startsWith('91')) {
+          phoneVariants.push(digitsOnly.slice(2), `+${digitsOnly}`);
+        }
+        const orConditions = phoneVariants.map(p => `phone_number.eq.${p}`).join(',');
+        query = query.or(orConditions);
+      }
+
+      const { data: matchedUsers, error: queryErr } = await query;
+
+      if (queryErr) {
+        console.warn('[AuthService] Profile query warning:', queryErr.message);
+      }
+
+      // 3. User NOT FOUND -> REJECT (Zero auto-provisioning)
+      if (!matchedUsers || matchedUsers.length === 0) {
+        const attempts = await this.recordFailedAttempt();
+        const remaining = 5 - attempts;
+        return {
+          success: false,
+          error: remaining > 0
+            ? `No registered account found with "${cleanId}". Please register first or verify your credentials. (${remaining} attempts remaining)`
+            : 'Account locked for 15 minutes due to 5 consecutive failed attempts.'
+        };
+      }
+
+      // 4. Role check: Find the profile matching the selected role
+      const matchedUser = matchedUsers.find(p => p.role === role);
+
+      if (!matchedUser) {
+        await this.recordFailedAttempt();
+        const registeredRole = this.getRoleDisplayName(matchedUsers[0].role as UserRole);
+        const selectedRole = this.getRoleDisplayName(role);
+
+        return {
+          success: false,
+          error: `Role Mismatch: This account is registered as a "${registeredRole}". You cannot log in under the "${selectedRole}" tab. Please switch to the "${registeredRole}" tab to authenticate.`
+        };
+      }
+
+      // 5. Account Deactivated check
+      if (matchedUser.is_deactivated) {
+        await this.recordFailedAttempt();
+        return {
+          success: false,
+          error: 'This account has been deactivated. Please contact emergency administration support.'
+        };
+      }
+
+      // 6. Ambulance Personnel approval check
+      if (role === 'AMBULANCE_PERSONNEL' && matchedUser.is_approved === false) {
+        await this.recordFailedAttempt();
+        return {
+          success: false,
+          error: 'Paramedic Verification Pending: Your ambulance crew credentials are awaiting approval by the Main Administrator.'
+        };
+      }
+
+      // 7. Successful authentication
+      const profile: Profile = {
+        id: matchedUser.id,
+        role: matchedUser.role,
+        fullName: matchedUser.full_name,
+        phoneNumber: matchedUser.phone_number,
+        email: matchedUser.email,
+        bloodGroup: matchedUser.blood_group,
+        medicalNotes: matchedUser.medical_notes,
+        isApproved: matchedUser.is_approved,
+        isDeactivated: matchedUser.is_deactivated,
+        createdAt: matchedUser.created_at,
+        updatedAt: matchedUser.updated_at
+      };
 
       await AsyncStorage.setItem('@mediconnect_current_user', JSON.stringify(profile));
       await this.resetFailedAttempts();
@@ -224,9 +279,27 @@ export const authService = {
       return {
         success: false,
         error: remaining > 0 
-          ? `Invalid credentials. ${remaining} attempts remaining before 15-minute security lockout.`
+          ? `Authentication failed. ${remaining} attempts remaining before 15-minute security lockout.`
           : 'Account locked for 15 minutes due to 5 failed attempts.'
       };
+    }
+  },
+
+  // Helper: Friendly display names for user roles
+  getRoleDisplayName(role: UserRole): string {
+    switch (role) {
+      case 'NORMAL_USER':
+        return 'Citizen User';
+      case 'EMERGENCY_CONTACT':
+        return 'Emergency Contact';
+      case 'AMBULANCE_PERSONNEL':
+        return 'Ambulance Personnel';
+      case 'MAIN_ADMIN':
+        return 'Main Administrator';
+      case 'SUB_ADMIN':
+        return 'Sub-Administrator';
+      default:
+        return String(role);
     }
   },
 

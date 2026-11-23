@@ -80,12 +80,28 @@ export const RoleBasedLogin: React.FC<RoleBasedLoginProps> = ({ onLoginSuccess }
       const cleanEmail = email.trim().toLowerCase();
 
       // Query database for this administrator
-      const { data, error } = await supabase
+      const { data: userByEmail } = await supabase
         .from('profiles')
         .select('*')
         .eq('email', cleanEmail)
-        .eq('role', adminRole)
         .maybeSingle();
+
+      if (userByEmail && userByEmail.role !== adminRole) {
+        setLoading(false);
+        const registeredRole = userByEmail.role === 'NORMAL_USER' 
+          ? 'Citizen User' 
+          : userByEmail.role === 'AMBULANCE_PERSONNEL' 
+            ? 'Ambulance Crew' 
+            : userByEmail.role === 'EMERGENCY_CONTACT' 
+              ? 'Emergency Contact' 
+              : userByEmail.role;
+        const targetRole = adminRole === 'MAIN_ADMIN' ? 'Main Administrator' : 'Sub-Administrator';
+        throw new Error(
+          `Role Mismatch: This account is registered as a ${registeredRole}. It cannot be used to log in as a ${targetRole}.`
+        );
+      }
+
+      const data = (userByEmail && userByEmail.role === adminRole) ? userByEmail : null;
 
       setLoading(false);
 

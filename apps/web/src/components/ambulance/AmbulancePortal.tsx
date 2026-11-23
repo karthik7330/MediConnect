@@ -167,6 +167,26 @@ export const AmbulancePortal: React.FC<AmbulancePortalProps> = ({
         .update({ current_status: nextKey })
         .eq('id', activeEmergency.id);
 
+      // Decrement hospital ICU bed when patient is picked up
+      if (nextKey === 'PATIENT_PICKED_UP') {
+        try {
+          const res = await fetch('/api/admin/hospitals', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              emergencyId: activeEmergency.id,
+              action: 'PATIENT_PICKED_UP'
+            })
+          });
+          const bedData = await res.json();
+          if (bedData.success) {
+            showToast(`Patient stabilized & picked up: 1 ICU bed allocated at destination hospital (Remaining: ${bedData.beds})`);
+          }
+        } catch (bedErr) {
+          console.warn('[AmbulancePortal] ICU bed allocation sync warning:', bedErr);
+        }
+      }
+
       setStepIndex(nextIdx);
       showToast(`Status updated: ${steps[nextIdx].title}`);
 

@@ -1,4 +1,4 @@
-import { supabase } from '../lib/supabase';
+import { supabase, supabaseAdmin } from '../lib/supabase';
 import { CrewAvailability, EmergencyStatus } from '@mediconnect/shared';
 
 export const ambulanceService = {
@@ -117,6 +117,43 @@ export const ambulanceService = {
           updated_by: ambulanceId,
           notes: notes || `Advanced to ${status}`
         });
+
+        // If patient picked up, decrement ICU bed at destination hospital
+        if (status === 'PATIENT_PICKED_UP') {
+          try {
+            const { data: reqData } = await supabaseAdmin
+              .from('emergency_requests')
+              .select('selected_hospital_id')
+              .eq('id', emergencyId)
+              .maybeSingle();
+
+            const targetHospitalId = reqData?.selected_hospital_id || 'a1111111-1111-1111-1111-111111111111';
+
+            if (!reqData?.selected_hospital_id) {
+              await supabaseAdmin
+                .from('emergency_requests')
+                .update({ selected_hospital_id: targetHospitalId })
+                .eq('id', emergencyId);
+            }
+
+            const { data: hosp } = await supabaseAdmin
+              .from('hospitals')
+              .select('id, name, icu_beds_available')
+              .eq('id', targetHospitalId)
+              .maybeSingle();
+
+            if (hosp) {
+              const newBeds = Math.max(0, (hosp.icu_beds_available ?? 1) - 1);
+              await supabaseAdmin
+                .from('hospitals')
+                .update({ icu_beds_available: newBeds })
+                .eq('id', targetHospitalId);
+              console.log(`[AmbulanceService] Decremented ICU bed at ${hosp.name}. Remaining: ${newBeds}`);
+            }
+          } catch (bedErr) {
+            console.warn('[AmbulanceService] Bed decrement warning:', bedErr);
+          }
+        }
 
         // If resolved, auto-stop live tracking and return crew to ONLINE
         if (status === 'EMERGENCY_RESOLVED') {

@@ -401,9 +401,27 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     if (!hosp) return;
     const newCount = Math.max(0, (hosp.icu_beds_available || 0) + delta);
 
-    await supabase.from('hospitals').update({ icu_beds_available: newCount }).eq('id', hospitalId);
+    // Optimistically update UI
     setHospitalsList(prev => prev.map(h => h.id === hospitalId ? { ...h, icu_beds_available: newCount } : h));
-    showToast(`Updated ICU beds for ${hosp.name}: ${newCount} beds available.`);
+
+    try {
+      const res = await fetch('/api/admin/hospitals', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hospitalId, delta })
+      });
+      const data = await res.json();
+      if (data.success && data.hospital) {
+        setHospitalsList(prev => prev.map(h => h.id === hospitalId ? data.hospital : h));
+        showToast(`Updated ICU beds for ${hosp.name}: ${data.hospital.icu_beds_available} beds available.`);
+      } else {
+        showToast(data.error || 'Failed to update beds.');
+        fetchPlatformData(true);
+      }
+    } catch {
+      fetchPlatformData(true);
+      showToast('Error syncing ICU bed update.');
+    }
   };
 
   return (
