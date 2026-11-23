@@ -39,23 +39,24 @@ export const mapNavigationService = {
       return url;
     }
 
-    // 2. OpenStreetMap Static Maps fallback (zero API key required)
-    let osmMarkers = '';
-    if (markers.length > 0) {
-      osmMarkers = markers.map(m => `&markers=${m.lat},${m.lng},${m.color || 'red'}`).join('');
-    } else {
-      osmMarkers = `&markers=${centerLat},${centerLng},red`;
-    }
-
-    return `https://staticmap.openstreetmap.de/staticmap.php?center=${centerLat},${centerLng}&zoom=${zoom}&size=${width}x${height}&maptype=mapnik${osmMarkers}`;
+    // Return empty so LiveMapCard directly renders high-contrast tactical SVG radar (guaranteed zero blank screen)
+    return '';
   },
 
   // Open Google Maps turn-by-turn navigation directly
   async openNavigation(destinationLat: number, destinationLng: number, destinationName?: string): Promise<void> {
+    if (!destinationLat || !destinationLng || isNaN(destinationLat) || isNaN(destinationLng)) {
+      Alert.alert('Location Error', 'Valid destination GPS coordinates were not found.');
+      return;
+    }
+
+    const label = encodeURIComponent(destinationName || 'Emergency Location');
+    // Primary Android Intent: launches Google Maps navigation directly to exact lat,lng
     const googleNavUrl = Platform.OS === 'android'
       ? `google.navigation:q=${destinationLat},${destinationLng}&mode=d`
-      : `maps://app?daddr=${destinationLat},${destinationLng}`;
+      : `maps://app?daddr=${destinationLat},${destinationLng}&dirflg=d`;
 
+    // Universal Google Maps web URL fallback
     const webFallbackUrl = `https://www.google.com/maps/dir/?api=1&destination=${destinationLat},${destinationLng}&travelmode=driving`;
 
     try {

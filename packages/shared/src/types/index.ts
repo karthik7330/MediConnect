@@ -23,6 +23,13 @@ export interface Coordinates {
   longitude: number;
 }
 
+export interface SubAdminAreaAssignment {
+  sector: string;
+  lat: number;
+  lng: number;
+  radiusKm: number;
+}
+
 export interface Profile {
   id: string;
   role: UserRole;
@@ -31,6 +38,7 @@ export interface Profile {
   email?: string;
   bloodGroup?: string;
   medicalNotes?: string;
+  area?: SubAdminAreaAssignment;
   isApproved: boolean;
   isDeactivated: boolean;
   createdAt: string;

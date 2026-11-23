@@ -10,6 +10,8 @@ import { EmergencyContactsScreen } from '../screens/user/EmergencyContactsScreen
 import { LiveTrackingScreen } from '../screens/tracking/LiveTrackingScreen';
 import { HospitalSelectionScreen } from '../screens/ambulance/HospitalSelectionScreen';
 import { RatingFeedbackModal } from '../screens/feedback/RatingFeedbackModal';
+import { ProfileScreen } from '../screens/common/ProfileScreen';
+import { EmergencyHistoryScreen } from '../screens/common/EmergencyHistoryScreen';
 import { notificationService } from '../services/notificationService';
 import { networkService } from '../services/networkService';
 import { firebaseService } from '../services/firebaseService';
@@ -21,7 +23,9 @@ type AppScreen =
   | 'DASHBOARD'
   | 'CONTACTS_MANAGER'
   | 'LIVE_TRACKING'
-  | 'HOSPITAL_PICKER';
+  | 'HOSPITAL_PICKER'
+  | 'PROFILE'
+  | 'HISTORY';
 
 export const RootNavigator: React.FC = () => {
   const [currentScreen, setCurrentScreen] = useState<AppScreen>('SPLASH');
@@ -125,7 +129,28 @@ export const RootNavigator: React.FC = () => {
     );
   }
 
-  // 6. Sign Out / Change Role Action
+  // 6. User Profile & Medical ID Screen
+  if (currentScreen === 'PROFILE') {
+    return (
+      <ProfileScreen
+        userProfile={userProfile}
+        onBack={() => setCurrentScreen('DASHBOARD')}
+        onProfileUpdated={(updated) => setUserProfile(updated)}
+      />
+    );
+  }
+
+  // 7. Scoped Emergency History Screen
+  if (currentScreen === 'HISTORY') {
+    return (
+      <EmergencyHistoryScreen
+        userProfile={userProfile}
+        onBack={() => setCurrentScreen('DASHBOARD')}
+      />
+    );
+  }
+
+  // 8. Sign Out / Change Role Action
   const handleLogout = () => {
     setUserProfile(null);
     setCurrentScreen('AUTH_HOME');
@@ -136,7 +161,7 @@ export const RootNavigator: React.FC = () => {
     setCurrentScreen('LIVE_TRACKING');
   };
 
-  // 7. Dedicated Mobile Dashboards by Role
+  // 9. Dedicated Mobile Dashboards by Role
   return (
     <View style={{ flex: 1 }}>
       {!isOnline && (
@@ -155,6 +180,8 @@ export const RootNavigator: React.FC = () => {
           onOpenContacts={() => setCurrentScreen('CONTACTS_MANAGER')}
           onOpenLiveTracking={handleOpenLiveTracking}
           onOpenFeedback={() => setFeedbackVisible(true)}
+          onOpenProfile={() => setCurrentScreen('PROFILE')}
+          onOpenHistory={() => setCurrentScreen('HISTORY')}
         />
       )}
 
@@ -164,6 +191,8 @@ export const RootNavigator: React.FC = () => {
           onSwitchRole={handleLogout}
           onOpenLiveTracking={() => handleOpenLiveTracking('EMG-20261119-994')}
           onOpenFeedback={() => setFeedbackVisible(true)}
+          onOpenProfile={() => setCurrentScreen('PROFILE')}
+          onOpenHistory={() => setCurrentScreen('HISTORY')}
         />
       )}
 
@@ -173,6 +202,8 @@ export const RootNavigator: React.FC = () => {
           onSwitchRole={handleLogout}
           onOpenHospitalPicker={() => setCurrentScreen('HOSPITAL_PICKER')}
           onOpenLiveTracking={() => handleOpenLiveTracking('EMG-20261119-994')}
+          onOpenProfile={() => setCurrentScreen('PROFILE')}
+          onOpenHistory={() => setCurrentScreen('HISTORY')}
         />
       )}
 

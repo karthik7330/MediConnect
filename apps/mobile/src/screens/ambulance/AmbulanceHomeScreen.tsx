@@ -14,7 +14,8 @@ import {
   MapPin, 
   Users, 
   User, 
-  ExternalLink 
+  ExternalLink,
+  History 
 } from 'lucide-react-native';
 import { theme } from '../../lib/theme';
 import { EmergencyStatus, CrewAvailability, EMERGENCY_STATUS_ORDER, STATUS_LABELS, CANCELLATION_REASONS, Profile } from '@mediconnect/shared';
@@ -31,6 +32,8 @@ interface AmbulanceHomeScreenProps {
   onSwitchRole: () => void;
   onOpenHospitalPicker?: () => void;
   onOpenLiveTracking?: () => void;
+  onOpenProfile?: () => void;
+  onOpenHistory?: () => void;
   userProfile?: Profile | null;
 }
 
@@ -38,6 +41,8 @@ export const AmbulanceHomeScreen: React.FC<AmbulanceHomeScreenProps> = ({
   onSwitchRole, 
   onOpenHospitalPicker, 
   onOpenLiveTracking,
+  onOpenProfile,
+  onOpenHistory,
   userProfile
 }) => {
   const [availability, setAvailability] = useState<CrewAvailability>('ONLINE');
@@ -656,16 +661,36 @@ export const AmbulanceHomeScreen: React.FC<AmbulanceHomeScreenProps> = ({
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       {/* Header */}
       <View style={styles.header}>
-        <View>
+        <View style={{ flex: 1 }}>
           <Text style={styles.greeting}>Crew Command</Text>
           <Text style={styles.roleTag}>
             {userProfile?.fullName || 'Paramedic Unit Officer'} • TN-01-AMB-4091
           </Text>
         </View>
-        <TouchableOpacity style={styles.switchButton} onPress={onSwitchRole}>
-          <LogOut size={16} color={theme.colors.accent} />
-          <Text style={styles.switchButtonText}>Sign Out</Text>
-        </TouchableOpacity>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+          {onOpenHistory && (
+            <TouchableOpacity 
+              style={[styles.switchButton, { backgroundColor: '#F1F5F9', borderColor: '#CBD5E1' }]} 
+              onPress={onOpenHistory}
+            >
+              <History size={14} color="#0F172A" />
+              <Text style={[styles.switchButtonText, { color: '#0F172A' }]}>History</Text>
+            </TouchableOpacity>
+          )}
+          {onOpenProfile && (
+            <TouchableOpacity 
+              style={[styles.switchButton, { backgroundColor: '#F1F5F9', borderColor: '#CBD5E1' }]} 
+              onPress={onOpenProfile}
+            >
+              <User size={14} color="#0F172A" />
+              <Text style={[styles.switchButtonText, { color: '#0F172A' }]}>Profile</Text>
+            </TouchableOpacity>
+          )}
+          <TouchableOpacity style={styles.switchButton} onPress={onSwitchRole}>
+            <LogOut size={16} color={theme.colors.accent} />
+            <Text style={styles.switchButtonText}>Sign Out</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       {/* Admin Approval & Availability Status Bar */}

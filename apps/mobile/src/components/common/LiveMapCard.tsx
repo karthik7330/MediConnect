@@ -168,11 +168,13 @@ export const LiveMapCard: React.FC<LiveMapCardProps> = ({
 
       {/* Map Display View */}
       <View style={styles.mapContainer}>
+        {renderSvgMapFallback()}
+
         {!imageError && mapImageUrl ? (
           <>
             <Image
               source={{ uri: mapImageUrl }}
-              style={styles.mapImage}
+              style={[StyleSheet.absoluteFill, styles.mapImage]}
               resizeMode="cover"
               onLoadEnd={() => setImageLoading(false)}
               onError={() => setImageError(true)}
@@ -180,13 +182,11 @@ export const LiveMapCard: React.FC<LiveMapCardProps> = ({
             {imageLoading && (
               <View style={styles.loadingOverlay}>
                 <ActivityIndicator size="small" color="#DC2626" />
-                <Text style={styles.loadingText}>Syncing GPS feed...</Text>
+                <Text style={styles.loadingText}>Syncing satellite imagery...</Text>
               </View>
             )}
           </>
-        ) : (
-          renderSvgMapFallback()
-        )}
+        ) : null}
 
         {/* Floating Coordinates Tag */}
         {patientCoords && (

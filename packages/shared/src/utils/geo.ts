@@ -92,3 +92,21 @@ export function parseCoordinates(loc: any): LatLng | null {
 
   return null;
 }
+
+/**
+ * Calculates geodesic distance between two coordinate points in Kilometers using Haversine formula.
+ */
+export function calculateDistanceKm(c1: LatLng, c2: LatLng): number {
+  const R = 6371; // Earth's mean radius in km
+  const dLat = ((c2.latitude - c1.latitude) * Math.PI) / 180;
+  const dLon = ((c2.longitude - c1.longitude) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((c1.latitude * Math.PI) / 180) *
+      Math.cos((c2.latitude * Math.PI) / 180) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return Number((R * c).toFixed(2));
+}
+

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   View, 
   Text, 
@@ -29,13 +29,16 @@ import {
   RefreshCw,
   MapPin,
   ExternalLink,
-  Truck
+  Truck,
+  User,
+  History
 } from 'lucide-react-native';
 import { theme } from '../../lib/theme';
-import { supabase } from '../../lib/supabase';
+import { supabase, supabaseAdmin } from '../../lib/supabase';
 import { contactService } from '../../services/contactService';
 import { mapNavigationService } from '../../services/mapNavigationService';
 import { distanceService } from '../../services/distanceService';
+import { notificationService } from '../../services/notificationService';
 import { LiveMapCard } from '../../components/common/LiveMapCard';
 import { Profile } from '@mediconnect/shared';
 
@@ -43,6 +46,8 @@ interface ContactHomeScreenProps {
   onSwitchRole: () => void;
   onOpenLiveTracking?: () => void;
   onOpenFeedback?: () => void;
+  onOpenProfile?: () => void;
+  onOpenHistory?: () => void;
   userProfile?: Profile | null;
 }
 
@@ -50,6 +55,8 @@ export const ContactHomeScreen: React.FC<ContactHomeScreenProps> = ({
   onSwitchRole, 
   onOpenLiveTracking, 
   onOpenFeedback,
+  onOpenProfile,
+  onOpenHistory,
   userProfile
 }) => {
   const [hasAcknowledged, setHasAcknowledged] = useState(false);
@@ -70,21 +77,38 @@ export const ContactHomeScreen: React.FC<ContactHomeScreenProps> = ({
   const [connectedCitizens, setConnectedCitizens] = useState<any[]>([]);
   const [loadingRequests, setLoadingRequests] = useState(true);
   const [respondingId, setRespondingId] = useState<string | null>(null);
+  const [authorizedCitizenIds, setAuthorizedCitizenIds] = useState<string[]>([]);
+  const authorizedIdsRef = useRef<string[]>([]);
 
   const contactPhone = userProfile?.phoneNumber || '';
   const contactUserId = userProfile?.id || '';
 
-  // 1. Fetch Incoming Connection Requests & Connected Citizens
+  // 1. Fetch Incoming Connection Requests & Connected Citizens (Only authorized family members)
   const loadRequestsAndConnections = async () => {
     if (!contactPhone && !contactUserId) return;
     setLoadingRequests(true);
     try {
-      const [requests, connected] = await Promise.all([
+      const [requests, connected, directContacts] = await Promise.all([
         contactService.getIncomingRequests(contactPhone),
-        contactService.getConnectedCitizens(contactPhone, contactUserId)
+        contactService.getConnectedCitizens(contactPhone, contactUserId),
+        supabaseAdmin.from('emergency_contacts').select('user_id').eq('contact_user_id', contactUserId)
       ]);
       setIncomingRequests(requests);
       setConnectedCitizens(connected);
+
+      // Build Set of citizens who have authorized this emergency contact
+      const ids = new Set<string>();
+      (connected || []).forEach((c: any) => {
+        if (c.sender_user_id) ids.add(c.sender_user_id);
+      });
+      (directContacts.data || []).forEach((c: any) => {
+        if (c.user_id) ids.add(c.user_id);
+      });
+
+      const idList = Array.from(ids);
+      setAuthorizedCitizenIds(idList);
+      authorizedIdsRef.current = idList;
+      await fetchActiveEmergency(idList);
     } catch (err) {
       console.warn('[ContactHomeScreen] Error loading requests:', err);
     } finally {
@@ -129,8 +153,17 @@ export const ContactHomeScreen: React.FC<ContactHomeScreenProps> = ({
     }
   };
 
-  // 3. Fetch Active Emergency Incidents with Patient & Hospital Joins
-  const fetchActiveEmergency = async () => {
+  // 3. Fetch Active Emergency Incidents STRICTLY SCOPED to authorized citizens who added this contact
+  const fetchActiveEmergency = async (citizenIds?: string[]) => {
+    const targetIds = citizenIds !== undefined ? citizenIds : authorizedIdsRef.current;
+
+    // Strict privacy boundary: If user has not been added by any citizen, do NOT load any incidents
+    if (!targetIds || targetIds.length === 0) {
+      setActiveEmergency(null);
+      setAssignedAmbulance(null);
+      return;
+    }
+
     try {
       const { data } = await supabase
         .from('emergency_requests')
@@ -139,6 +172,7 @@ export const ContactHomeScreen: React.FC<ContactHomeScreenProps> = ({
           patient:profiles!emergency_requests_user_id_fkey(full_name, phone_number, blood_group, medical_notes),
           hospital:hospitals!emergency_requests_selected_hospital_id_fkey(name, address, emergency_phone, icu_beds_available)
         `)
+        .in('user_id', targetIds)
         .neq('current_status', 'EMERGENCY_RESOLVED')
         .neq('current_status', 'EMERGENCY_CANCELLED')
         .order('created_at', { ascending: false })
@@ -165,14 +199,22 @@ export const ContactHomeScreen: React.FC<ContactHomeScreenProps> = ({
 
   useEffect(() => {
     loadRequestsAndConnections();
-    fetchActiveEmergency();
 
     // 1. Live subscription for Emergency Incidents
     const channelId = `contact_feed_${Date.now()}`;
     const emergencyChannel = supabase
       .channel(channelId)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'emergency_requests' }, (payload: any) => {
-        if (payload.new) {
+        if (payload.new && authorizedIdsRef.current.includes(payload.new.user_id)) {
+          // Send SOS alert notification to the emergency contact
+          if (payload.eventType === 'INSERT' || payload.new.current_status === 'SOS_ACTIVATED') {
+            notificationService.dispatchSosAlert({
+              emergencyId: payload.new.id,
+              patientName: payload.new.patient?.full_name || 'Your Connected Family Member',
+              locationText: payload.new.address_text || 'Live GPS Incident Coordinates'
+            });
+          }
+
           // Immediately apply new status to UI without waiting
           setActiveEmergency((prev: any) => {
             if (!prev || prev.id === payload.new.id) {
@@ -189,8 +231,8 @@ export const ContactHomeScreen: React.FC<ContactHomeScreenProps> = ({
           if (payload.new.assigned_ambulance_id && payload.new.current_status !== 'SOS_ACTIVATED') {
             fetchAmbulanceTelemetry(payload.new.assigned_ambulance_id, payload.new.id);
           }
+          fetchActiveEmergency(authorizedIdsRef.current);
         }
-        fetchActiveEmergency();
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'live_ambulance_tracking' }, (payload: any) => {
         if (payload.new?.current_location) {
@@ -225,7 +267,7 @@ export const ContactHomeScreen: React.FC<ContactHomeScreenProps> = ({
 
     // 3. Guaranteed auto-sync timer every 2.5 seconds: ensures status & live coordinates update automatically without re-login!
     const autoSyncTimer = setInterval(() => {
-      fetchActiveEmergency();
+      fetchActiveEmergency(authorizedIdsRef.current);
     }, 2500);
 
     return () => {
@@ -320,10 +362,27 @@ export const ContactHomeScreen: React.FC<ContactHomeScreenProps> = ({
           </Text>
         </View>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+          {onOpenHistory && (
+            <TouchableOpacity
+              style={[styles.switchButton, { backgroundColor: '#F1F5F9', borderColor: '#CBD5E1' }]}
+              onPress={onOpenHistory}
+            >
+              <History size={14} color="#0F172A" />
+              <Text style={[styles.switchButtonText, { color: '#0F172A' }]}>History</Text>
+            </TouchableOpacity>
+          )}
+          {onOpenProfile && (
+            <TouchableOpacity
+              style={[styles.switchButton, { backgroundColor: '#F1F5F9', borderColor: '#CBD5E1' }]}
+              onPress={onOpenProfile}
+            >
+              <User size={14} color="#0F172A" />
+              <Text style={[styles.switchButtonText, { color: '#0F172A' }]}>Profile</Text>
+            </TouchableOpacity>
+          )}
           <TouchableOpacity
             style={[styles.switchButton, { backgroundColor: '#F1F5F9', borderColor: '#CBD5E1' }]}
             onPress={() => {
-              fetchActiveEmergency();
               loadRequestsAndConnections();
             }}
           >

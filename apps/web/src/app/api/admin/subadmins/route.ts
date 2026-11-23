@@ -8,7 +8,7 @@ const supabaseAdmin = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ''
 );
 
-// GET: List all Sub-Admins and their permissions
+// GET: List all Sub-Admins with their permissions and assigned 10KM operational areas
 export async function GET() {
   try {
     const { data: profiles, error: pErr } = await supabaseAdmin
@@ -35,8 +35,27 @@ export async function GET() {
         can_view_analytics: false,
         can_view_logs: false
       };
+
+      let area = { sector: 'Central Sector', lat: 13.0827, lng: 80.2707, radiusKm: 10 };
+      if (p.medical_notes) {
+        try {
+          const parsed = JSON.parse(p.medical_notes);
+          if (typeof parsed.lat === 'number' && typeof parsed.lng === 'number') {
+            area = {
+              sector: parsed.sector || 'Designated Zone',
+              lat: Number(parsed.lat),
+              lng: Number(parsed.lng),
+              radiusKm: Number(parsed.radiusKm || parsed.radius_km || 10)
+            };
+          }
+        } catch {
+          // ignore non-json
+        }
+      }
+
       return {
         ...p,
+        area,
         permissions: perm
       };
     });
@@ -49,11 +68,11 @@ export async function GET() {
   }
 }
 
-// POST: Main Admin manually creates and assigns a new Sub-Admin
+// POST: Main Admin appoints a new Sub-Admin with designated coordinates & 10KM operational radius
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { fullName, email, phone, permissions } = body;
+    const { fullName, email, phone, permissions, sectorName, assignedLat, assignedLng, radiusKm } = body;
 
     if (!fullName || !email || !phone) {
       return NextResponse.json({ error: 'Full name, email, and phone number are required.' }, { status: 400 });
@@ -61,6 +80,15 @@ export async function POST(req: NextRequest) {
 
     const cleanEmail = email.trim().toLowerCase();
     const cleanPhone = phone.trim();
+
+    // Sector & 10KM Operational Area configuration
+    const areaConfig = {
+      sector: sectorName?.trim() || 'Central Sector Zone',
+      lat: typeof assignedLat === 'number' ? assignedLat : parseFloat(assignedLat) || 13.0827,
+      lng: typeof assignedLng === 'number' ? assignedLng : parseFloat(assignedLng) || 80.2707,
+      radiusKm: typeof radiusKm === 'number' ? radiusKm : parseFloat(radiusKm) || 10
+    };
+    const areaJson = JSON.stringify(areaConfig);
 
     // 1. Check if profile already exists for this email or phone
     const { data: existingProfile } = await supabaseAdmin
@@ -81,6 +109,7 @@ export async function POST(req: NextRequest) {
           full_name: fullName.trim(),
           email: cleanEmail,
           phone_number: cleanPhone,
+          medical_notes: areaJson,
           is_approved: true,
           is_deactivated: false
         })
@@ -103,6 +132,7 @@ export async function POST(req: NextRequest) {
           full_name: fullName.trim(),
           email: cleanEmail,
           phone_number: cleanPhone,
+          medical_notes: areaJson,
           is_approved: true,
           is_deactivated: false
         })
@@ -136,7 +166,7 @@ export async function POST(req: NextRequest) {
       console.warn('Permissions table upsert warning:', permCatchErr);
     }
 
-    // 3. Dispatch notification email (non-blocking: never fails the appointment if email service is unconfigured)
+    // 3. Dispatch notification email
     try {
       await mailerService.sendEmail({
         to: cleanEmail,
@@ -148,12 +178,13 @@ export async function POST(req: NextRequest) {
               Hello <strong>${fullName.trim()}</strong>, you have been designated as a <strong>Sub-Administrator</strong> by Main Administrator <strong>Karthik</strong>.
             </p>
             <div style="background-color: white; border: 1px solid #CBD5E1; border-radius: 8px; padding: 16px; margin: 16px 0;">
+              <p style="margin: 4px 0; font-size: 13px;"><strong>Assigned Sector:</strong> ${areaConfig.sector} (${areaConfig.radiusKm} KM Radius)</p>
+              <p style="margin: 4px 0; font-size: 13px;"><strong>Sector Coordinates:</strong> ${areaConfig.lat.toFixed(4)}, ${areaConfig.lng.toFixed(4)}</p>
               <p style="margin: 4px 0; font-size: 13px;"><strong>Assigned Email:</strong> ${cleanEmail}</p>
               <p style="margin: 4px 0; font-size: 13px;"><strong>Initial Password:</strong> admin@123</p>
-              <p style="margin: 4px 0; font-size: 13px;"><strong>Portal URL:</strong> https://medi-connect-five.vercel.app</p>
             </div>
             <p style="color: #64748B; font-size: 12px;">
-              Your granular role permissions have been activated in the system.
+              Only emergency requests within your designated ${areaConfig.radiusKm} KM operational area will be routed to your command console.
             </p>
           </div>
         `
@@ -164,8 +195,11 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ 
       success: true, 
-      subadmin: savedProfile || { id: subAdminId, full_name: fullName, email: cleanEmail, phone_number: cleanPhone, role: 'SUB_ADMIN' },
-      message: `Sub-Admin ${fullName} successfully appointed.`
+      subadmin: {
+        ...(savedProfile || { id: subAdminId, full_name: fullName, email: cleanEmail, phone_number: cleanPhone, role: 'SUB_ADMIN' }),
+        area: areaConfig
+      },
+      message: `Sub-Admin ${fullName} successfully appointed for sector "${areaConfig.sector}" (${areaConfig.radiusKm} KM radius).`
     });
   } catch (err: unknown) {
     console.error('Sub-Admin appointment error:', err);
@@ -175,32 +209,47 @@ export async function POST(req: NextRequest) {
   }
 }
 
-// PUT: Toggle granular permissions
+// PUT: Toggle granular permissions or update area coordinates
 export async function PUT(req: NextRequest) {
   try {
-    const { adminId, permissions } = await req.json();
+    const { adminId, permissions, sectorName, assignedLat, assignedLng, radiusKm } = await req.json();
 
-    if (!adminId || !permissions) {
-      return NextResponse.json({ error: 'adminId and permissions required' }, { status: 400 });
+    if (!adminId) {
+      return NextResponse.json({ error: 'adminId required' }, { status: 400 });
     }
 
-    const { error } = await supabaseAdmin
-      .from('sub_admin_permissions')
-      .upsert({
-        admin_id: adminId,
-        can_approve_ambulance: Boolean(permissions.can_approve_ambulance),
-        can_manage_users: Boolean(permissions.can_manage_users),
-        can_manual_assign: Boolean(permissions.can_manual_assign),
-        can_view_analytics: Boolean(permissions.can_view_analytics),
-        can_view_logs: Boolean(permissions.can_view_logs)
-      });
+    if (permissions) {
+      const { error } = await supabaseAdmin
+        .from('sub_admin_permissions')
+        .upsert({
+          admin_id: adminId,
+          can_approve_ambulance: Boolean(permissions.can_approve_ambulance),
+          can_manage_users: Boolean(permissions.can_manage_users),
+          can_manual_assign: Boolean(permissions.can_manual_assign),
+          can_view_analytics: Boolean(permissions.can_view_analytics),
+          can_view_logs: Boolean(permissions.can_view_logs)
+        });
 
-    if (error) throw error;
+      if (error) throw error;
+    }
 
-    return NextResponse.json({ success: true, message: 'Permissions updated successfully.' });
+    if (assignedLat && assignedLng) {
+      const areaConfig = {
+        sector: sectorName?.trim() || 'Designated Zone',
+        lat: Number(assignedLat),
+        lng: Number(assignedLng),
+        radiusKm: Number(radiusKm) || 10
+      };
+      await supabaseAdmin
+        .from('profiles')
+        .update({ medical_notes: JSON.stringify(areaConfig) })
+        .eq('id', adminId);
+    }
+
+    return NextResponse.json({ success: true, message: 'Sub-Admin updated successfully.' });
   } catch (err: unknown) {
     return NextResponse.json({ 
-      error: err instanceof Error ? err.message : 'Failed to update permissions' 
+      error: err instanceof Error ? err.message : 'Failed to update sub-admin' 
     }, { status: 500 });
   }
 }

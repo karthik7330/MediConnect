@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { 
   ShieldAlert, 
   Truck, 
@@ -19,10 +19,15 @@ import {
   Hospital as HospitalIcon, 
   Trash2, 
   UserPlus, 
-  RefreshCw 
+  RefreshCw,
+  History,
+  User,
+  Save,
+  Navigation,
+  Compass
 } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
-import { Profile, parseCoordinates } from '@mediconnect/shared';
+import { Profile, parseCoordinates, calculateDistanceKm } from '@mediconnect/shared';
 
 interface AdminDashboardProps {
   currentProfile: Profile;
@@ -37,8 +42,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 }) => {
   const isMainAdmin = currentProfile.role === 'MAIN_ADMIN';
 
-  const [activeTab, setActiveTab] = useState<'INCIDENTS' | 'FLEET' | 'HOSPITALS' | 'SUB_ADMINS' | 'ANALYTICS' | 'LOGS'>('INCIDENTS');
+  const [activeTab, setActiveTab] = useState<'INCIDENTS' | 'HISTORY' | 'FLEET' | 'HOSPITALS' | 'SUB_ADMINS' | 'ANALYTICS' | 'LOGS'>('INCIDENTS');
   const [activeCalls, setActiveCalls] = useState<any[]>([]);
+  const [historyCalls, setHistoryCalls] = useState<any[]>([]);
   const [fleetList, setFleetList] = useState<any[]>([]);
   const [hospitalsList, setHospitalsList] = useState<any[]>([]);
   const [subAdmins, setSubAdmins] = useState<any[]>([]);
@@ -49,6 +55,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [newSubName, setNewSubName] = useState('');
   const [newSubEmail, setNewSubEmail] = useState('');
   const [newSubPhone, setNewSubPhone] = useState('');
+  const [newSubSector, setNewSubSector] = useState('Tambaram Sector');
+  const [newSubLat, setNewSubLat] = useState('12.9249');
+  const [newSubLng, setNewSubLng] = useState('80.1478');
+  const [detectingGps, setDetectingGps] = useState(false);
   const [newSubPerms, setNewSubPerms] = useState({
     can_approve_ambulance: true,
     can_manual_assign: true,
@@ -57,6 +67,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     can_manage_users: false
   });
   const [subAdminSubmitting, setSubAdminSubmitting] = useState(false);
+
+  // Profile Modal state
+  const [showProfileModal, setShowProfileModal] = useState(false);
+  const [profileName, setProfileName] = useState(currentProfile.fullName || '');
+  const [profilePhone, setProfilePhone] = useState(currentProfile.phoneNumber || '');
+  const [profileEmail, setProfileEmail] = useState(currentProfile.email || '');
+  const [profileSaving, setProfileSaving] = useState(false);
 
   // Manual Dispatch Modal
   const [selectedIncidentForDispatch, setSelectedIncidentForDispatch] = useState<any | null>(null);
@@ -73,23 +90,99 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setTimeout(() => setToastMessage(null), 3500);
   };
 
+  // Memoized Operational Area for Sub-Admin
+  const subAdminArea = useMemo(() => {
+    if (isMainAdmin) return null;
+    if (currentProfile.area) {
+      return currentProfile.area;
+    }
+    const notes = currentProfile.medicalNotes || (currentProfile as any).medical_notes;
+    if (notes) {
+      try {
+        const parsed = JSON.parse(notes);
+        if (typeof parsed.lat === 'number' && typeof parsed.lng === 'number') {
+          return {
+            sector: parsed.sector || 'Designated Jurisdiction',
+            lat: Number(parsed.lat),
+            lng: Number(parsed.lng),
+            radiusKm: Number(parsed.radiusKm || parsed.radius_km || 10)
+          };
+        }
+      } catch {
+        // ignore non-json
+      }
+    }
+    return {
+      sector: userLocation?.city || 'Operational Sector',
+      lat: userLocation?.lat || 13.0827,
+      lng: userLocation?.lng || 80.2707,
+      radiusKm: 10
+    };
+  }, [isMainAdmin, currentProfile, userLocation]);
+
+  // Filter active calls: Main Admin sees whole platform; Sub-Admin sees only calls <= 10 KM from sector center
+  const displayedActiveCalls = useMemo(() => {
+    if (isMainAdmin || !subAdminArea) return activeCalls;
+    return activeCalls.filter(call => {
+      if (!call.coords) return false;
+      const dist = calculateDistanceKm(
+        { latitude: subAdminArea.lat, longitude: subAdminArea.lng },
+        { latitude: call.coords.lat, longitude: call.coords.lng }
+      );
+      return dist <= subAdminArea.radiusKm;
+    });
+  }, [activeCalls, isMainAdmin, subAdminArea]);
+
+  // Filter history calls: Main Admin sees complete system history; Sub-Admin sees only requests within their 10 KM operational area
+  const displayedHistoryCalls = useMemo(() => {
+    if (isMainAdmin || !subAdminArea) return historyCalls;
+    return historyCalls.filter(call => {
+      if (!call.coords) return false;
+      const dist = calculateDistanceKm(
+        { latitude: subAdminArea.lat, longitude: subAdminArea.lng },
+        { latitude: call.coords.lat, longitude: call.coords.lng }
+      );
+      return dist <= subAdminArea.radiusKm;
+    });
+  }, [historyCalls, isMainAdmin, subAdminArea]);
+
+  // Detect GPS location for new sub-admin assignment
+  const handleDetectLocationForSubAdmin = () => {
+    if (typeof navigator !== 'undefined' && navigator.geolocation) {
+      setDetectingGps(true);
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          setNewSubLat(pos.coords.latitude.toFixed(4));
+          setNewSubLng(pos.coords.longitude.toFixed(4));
+          setDetectingGps(false);
+          showToast(`Detected GPS: ${pos.coords.latitude.toFixed(4)}, ${pos.coords.longitude.toFixed(4)}`);
+        },
+        () => {
+          setDetectingGps(false);
+          showToast('GPS unavailable. Please input coordinates manually.');
+        },
+        { enableHighAccuracy: true, timeout: 8000 }
+      );
+    } else {
+      showToast('Geolocation not supported by browser.');
+    }
+  };
+
   // Fetch real platform data from Supabase and APIs (with silent background sync)
   const fetchPlatformData = async (silent: boolean = false) => {
     if (!silent) setLoading(true);
 
     try {
-      // 1. Fetch live active emergencies from Supabase
-      const { data: emgData } = await supabase
+      // 1. Fetch all emergencies from Supabase (active + history)
+      const { data: allReqData } = await supabase
         .from('emergency_requests')
         .select('*')
-        .neq('current_status', 'EMERGENCY_RESOLVED')
-        .neq('current_status', 'EMERGENCY_CANCELLED')
         .order('created_at', { ascending: false });
 
-      if (emgData && emgData.length > 0) {
+      if (allReqData && allReqData.length > 0) {
         // Collect citizen user IDs and assigned ambulance IDs
-        const userIds = Array.from(new Set(emgData.map(c => c.user_id).filter(Boolean)));
-        const crewIds = Array.from(new Set(emgData.map(c => c.assigned_ambulance_id).filter(Boolean)));
+        const userIds = Array.from(new Set(allReqData.map(c => c.user_id).filter(Boolean)));
+        const crewIds = Array.from(new Set(allReqData.map(c => c.assigned_ambulance_id).filter(Boolean)));
         const allProfileIds = Array.from(new Set([...userIds, ...crewIds]));
 
         let profilesMap: Record<string, any> = {};
@@ -114,7 +207,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           }
         }
 
-        const enriched = emgData.map(call => {
+        const enrichedAll = allReqData.map(call => {
           const patient = profilesMap[call.user_id] || null;
           const crew = call.assigned_ambulance_id ? crewMap[call.assigned_ambulance_id] : null;
           const officer = call.assigned_ambulance_id ? profilesMap[call.assigned_ambulance_id] : null;
@@ -139,9 +232,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           };
         });
 
-        setActiveCalls(enriched);
+        const active = enrichedAll.filter(
+          c => c.current_status !== 'EMERGENCY_RESOLVED' && c.current_status !== 'EMERGENCY_CANCELLED'
+        );
+
+        setActiveCalls(active);
+        setHistoryCalls(enrichedAll);
       } else {
         setActiveCalls([]);
+        setHistoryCalls([]);
       }
 
       // 2. Fetch fleet crews
@@ -236,7 +335,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           fullName: cleanName,
           email: cleanEmail,
           phone: cleanPhone,
-          permissions: newSubPerms
+          permissions: newSubPerms,
+          sectorName: newSubSector.trim() || 'Central Sector Zone',
+          assignedLat: parseFloat(newSubLat) || 13.0827,
+          assignedLng: parseFloat(newSubLng) || 80.2707,
+          radiusKm: 10
         })
       });
 
@@ -244,7 +347,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
       if (data && data.success) {
         setSubAdminSubmitting(false);
-        showToast(`Sub-Admin ${cleanName} appointed successfully!`);
+        showToast(`Sub-Admin ${cleanName} appointed for ${newSubSector.trim()} (10 KM Radius)!`);
         setShowCreateSubAdminModal(false);
         setNewSubName('');
         setNewSubEmail('');
@@ -277,12 +380,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
     const targetId = existing?.id || (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : '44444444-4444-4444-4444-' + Math.floor(100000000000 + Math.random() * 900000000000));
 
+    const areaPayload = JSON.stringify({
+      sector: newSubSector.trim() || 'Central Sector Zone',
+      lat: parseFloat(newSubLat) || 13.0827,
+      lng: parseFloat(newSubLng) || 80.2707,
+      radiusKm: 10
+    });
+
     const { error: profError } = await supabase.from('profiles').upsert({
       id: targetId,
       role: 'SUB_ADMIN',
       full_name: name,
       email: email,
       phone_number: phone,
+      medical_notes: areaPayload,
       is_approved: true,
       is_deactivated: false
     });
@@ -303,12 +414,39 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
 
     setSubAdminSubmitting(false);
-    showToast(`Sub-Admin ${name} appointed successfully!`);
+    showToast(`Sub-Admin ${name} appointed for ${newSubSector.trim()} (10 KM Radius)!`);
     setShowCreateSubAdminModal(false);
     setNewSubName('');
     setNewSubEmail('');
     setNewSubPhone('');
     fetchPlatformData();
+  };
+
+  // Update profile details directly to Supabase
+  const handleSaveProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setProfileSaving(true);
+    try {
+      const { error } = await supabase
+        .from('profiles')
+        .update({
+          full_name: profileName.trim(),
+          phone_number: profilePhone.trim(),
+          email: profileEmail.trim().toLowerCase()
+        })
+        .eq('id', currentProfile.id);
+
+      if (error) throw error;
+      currentProfile.fullName = profileName.trim();
+      currentProfile.phoneNumber = profilePhone.trim();
+      currentProfile.email = profileEmail.trim().toLowerCase();
+      showToast('Admin profile updated successfully.');
+      setShowProfileModal(false);
+    } catch (err: unknown) {
+      showToast(err instanceof Error ? err.message : 'Failed to save profile');
+    } finally {
+      setProfileSaving(false);
+    }
   };
 
   // Toggle Sub-Admin permissions in real time
@@ -437,7 +575,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       {/* Header */}
       <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 mb-8 bg-white p-6 rounded-3xl border border-slate-200/80 shadow-sm">
         <div>
-          <div className="flex items-center gap-2 mb-1">
+          <div className="flex items-center gap-2 mb-1 flex-wrap">
             <span className={`px-2.5 py-0.5 rounded-full text-xs font-black uppercase tracking-wider ${
               isMainAdmin ? 'bg-red-100 text-red-700 border border-red-200' : 'bg-amber-100 text-amber-700 border border-amber-200'
             }`}>
@@ -447,6 +585,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
               Live Telemetry Stream • Auto-Sync 3s
             </span>
+            {!isMainAdmin && subAdminArea && (
+              <span className="inline-flex items-center gap-1 text-xs text-blue-800 font-bold bg-blue-50 px-2.5 py-0.5 rounded-full border border-blue-200">
+                <Compass className="w-3.5 h-3.5 text-blue-600" />
+                {subAdminArea.sector} (Fixed 10 KM Radius)
+              </span>
+            )}
           </div>
           <h1 className="text-2xl font-black text-slate-900">
             Emergency Operations & Dispatch Command
@@ -456,7 +600,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             <span>•</span>
             <span className="inline-flex items-center gap-1 text-slate-700 font-semibold">
               <MapPin className="w-3.5 h-3.5 text-red-500" />
-              {userLocation.city}
+              {isMainAdmin ? userLocation.city : `${subAdminArea?.sector || userLocation.city} [10 KM Zone]`}
             </span>
           </p>
         </div>
@@ -468,9 +612,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-xs flex items-center gap-1.5 shadow-sm transition-all"
             >
               <UserPlus className="w-4 h-4" />
-              <span>Assign Sub-Admin</span>
+              <span>Appoint Sub-Admin</span>
             </button>
           )}
+
+          <button
+            onClick={() => setShowProfileModal(true)}
+            className="px-3.5 py-2 rounded-xl border border-slate-300 hover:bg-slate-50 text-slate-700 font-bold text-xs flex items-center gap-1.5 transition-all"
+          >
+            <User className="w-3.5 h-3.5 text-slate-600" />
+            <span>Profile</span>
+          </button>
 
           <button
             onClick={onLogout}
@@ -485,11 +637,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
         <div className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-sm">
           <div className="flex items-center justify-between text-slate-500 text-xs font-bold uppercase tracking-wider mb-2">
-            <span>Active Incidents</span>
+            <span>{isMainAdmin ? 'Active Incidents' : 'Sector Incidents (10km)'}</span>
             <Activity className="w-4 h-4 text-red-500" />
           </div>
-          <div className="text-3xl font-black text-slate-900">{activeCalls.length}</div>
-          <div className="text-[11px] text-red-600 font-semibold mt-1">Live PostGIS Queue</div>
+          <div className="text-3xl font-black text-slate-900">{displayedActiveCalls.length}</div>
+          <div className="text-[11px] text-red-600 font-semibold mt-1">
+            {isMainAdmin ? 'All Platform Incidents' : `Within 10 KM of ${subAdminArea?.sector || 'Center'}`}
+          </div>
         </div>
 
         <div className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-sm">
@@ -503,11 +657,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
         <div className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-sm">
           <div className="flex items-center justify-between text-slate-500 text-xs font-bold uppercase tracking-wider mb-2">
-            <span>Assigned Sub-Admins</span>
+            <span>{isMainAdmin ? 'Appointed Sub-Admins' : 'Total Past Incidents'}</span>
             <Users className="w-4 h-4 text-blue-500" />
           </div>
-          <div className="text-3xl font-black text-slate-900">{subAdmins.length}</div>
-          <div className="text-[11px] text-blue-600 font-semibold mt-1">Delegated operators</div>
+          <div className="text-3xl font-black text-slate-900">
+            {isMainAdmin ? subAdmins.length : displayedHistoryCalls.length}
+          </div>
+          <div className="text-[11px] text-blue-600 font-semibold mt-1">
+            {isMainAdmin ? 'Area-wise operators' : 'In your 10 KM sector'}
+          </div>
         </div>
 
         <div className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-sm">
@@ -531,7 +689,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           }`}
         >
           <Activity className="w-4 h-4" />
-          <span>Live Emergency Stream ({activeCalls.length})</span>
+          <span>{isMainAdmin ? 'Live Emergency Stream' : 'Sector Live Queue'} ({displayedActiveCalls.length})</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('HISTORY')}
+          className={`px-4 py-2.5 rounded-xl font-bold text-xs transition-all flex items-center gap-2 ${
+            activeTab === 'HISTORY' ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100'
+          }`}
+        >
+          <History className="w-4 h-4" />
+          <span>{isMainAdmin ? 'All Platform History' : 'My Sector History (10 KM)'} ({displayedHistoryCalls.length})</span>
         </button>
 
         {isMainAdmin && (
@@ -587,107 +755,153 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         </button>
       </div>
 
-      {/* Tab 1: Live Incidents Stream */}
+      {/* Tab 1: Live Incidents Stream (Area-filtered for Sub-Admin) */}
       {activeTab === 'INCIDENTS' && (
         <div className="space-y-4">
+          {!isMainAdmin && subAdminArea && (
+            <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 p-4 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-sm">
+              <div className="flex items-start gap-3">
+                <div className="w-9 h-9 rounded-xl bg-blue-600 text-white flex items-center justify-center shrink-0">
+                  <Compass className="w-5 h-5" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-black text-blue-950 uppercase tracking-wider">
+                      Area-Wise Sub-Admin Mode Active
+                    </span>
+                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-200 text-blue-800">
+                      10 KM Fixed Radius
+                    </span>
+                  </div>
+                  <p className="text-xs text-blue-800 mt-0.5">
+                    Assigned Operational Sector: <strong className="font-bold">{subAdminArea.sector}</strong> • Center: ({subAdminArea.lat.toFixed(4)}, {subAdminArea.lng.toFixed(4)})
+                  </p>
+                  <p className="text-[11px] text-blue-600">
+                    Requests outside your 10 KM jurisdiction are routed to their respective area sub-administrators.
+                  </p>
+                </div>
+              </div>
+              <div className="text-right sm:border-l sm:border-blue-200 sm:pl-4 shrink-0">
+                <span className="text-2xl font-black text-blue-900">{displayedActiveCalls.length}</span>
+                <span className="text-[11px] font-semibold text-blue-700 block">in your 10km radius</span>
+              </div>
+            </div>
+          )}
+
           <div className="flex items-center justify-between">
             <h2 className="text-base font-bold text-slate-900">
-              Active Emergency Queue
+              {isMainAdmin ? 'All Platform Active Emergency Queue' : `Active Emergencies in ${subAdminArea?.sector || 'Your Sector'}`}
             </h2>
             <div className="text-xs text-slate-500 font-mono">
-              Auto-expanding radial geofence: 5,000m – 30,000m
+              {isMainAdmin ? 'Global View • All Sectors' : 'Filtered to 10 KM operational radius'}
             </div>
           </div>
 
-          {activeCalls.length > 0 ? (
+          {displayedActiveCalls.length > 0 ? (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {activeCalls.map(call => (
-                <div key={call.id} className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-sm flex flex-col justify-between hover:border-slate-300 transition-all">
-                  <div>
-                    <div className="flex items-center justify-between mb-3">
-                      <span className="font-mono text-xs font-bold text-slate-800">
-                        Incident #{call.id.slice(0, 8)}
-                      </span>
-                      <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-black uppercase ${
-                        call.current_status === 'SOS_ACTIVATED' ? 'bg-red-100 text-red-700 animate-pulse' :
-                        call.current_status === 'REQUEST_ACCEPTED' ? 'bg-blue-100 text-blue-700' :
-                        call.current_status === 'AMBULANCE_ON_THE_WAY' ? 'bg-amber-100 text-amber-700' :
-                        call.current_status === 'AMBULANCE_ARRIVED' ? 'bg-indigo-100 text-indigo-700' :
-                        'bg-emerald-100 text-emerald-700'
-                      }`}>
-                        {call.current_status.replace(/_/g, ' ')}
-                      </span>
-                    </div>
+              {displayedActiveCalls.map(call => {
+                const distFromSubAdmin = !isMainAdmin && subAdminArea && call.coords
+                  ? calculateDistanceKm(
+                      { latitude: subAdminArea.lat, longitude: subAdminArea.lng },
+                      { latitude: call.coords.lat, longitude: call.coords.lng }
+                    )
+                  : null;
 
-                    <div className="space-y-2.5 text-xs text-slate-600 mb-4">
-                      {/* Citizen Patient Info */}
-                      {call.patient && (
-                        <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-100 flex items-center justify-between">
-                          <div>
-                            <span className="font-bold text-slate-900 block">{call.patient.full_name}</span>
-                            <span className="text-[11px] text-slate-500 font-mono">{call.patient.phone_number}</span>
+                return (
+                  <div key={call.id} className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-sm flex flex-col justify-between hover:border-slate-300 transition-all">
+                    <div>
+                      <div className="flex items-center justify-between mb-3">
+                        <span className="font-mono text-xs font-bold text-slate-800">
+                          Incident #{call.id.slice(0, 8)}
+                        </span>
+                        <div className="flex items-center gap-1.5">
+                          {distFromSubAdmin !== null && (
+                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-800">
+                              {distFromSubAdmin.toFixed(1)} km from center
+                            </span>
+                          )}
+                          <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-black uppercase ${
+                            call.current_status === 'SOS_ACTIVATED' ? 'bg-red-100 text-red-700 animate-pulse' :
+                            call.current_status === 'REQUEST_ACCEPTED' ? 'bg-blue-100 text-blue-700' :
+                            call.current_status === 'AMBULANCE_ON_THE_WAY' ? 'bg-amber-100 text-amber-700' :
+                            call.current_status === 'AMBULANCE_ARRIVED' ? 'bg-indigo-100 text-indigo-700' :
+                            'bg-emerald-100 text-emerald-700'
+                          }`}>
+                            {call.current_status.replace(/_/g, ' ')}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="space-y-2.5 text-xs text-slate-600 mb-4">
+                        {/* Citizen Patient Info */}
+                        {call.patient && (
+                          <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-100 flex items-center justify-between">
+                            <div>
+                              <span className="font-bold text-slate-900 block">{call.patient.full_name}</span>
+                              <span className="text-[11px] text-slate-500 font-mono">{call.patient.phone_number}</span>
+                            </div>
+                            {call.patient.blood_group && (
+                              <span className="px-2 py-0.5 rounded-md text-[10px] font-black bg-red-100 text-red-700">
+                                Blood: {call.patient.blood_group}
+                              </span>
+                            )}
                           </div>
-                          {call.patient.blood_group && (
-                            <span className="px-2 py-0.5 rounded-md text-[10px] font-black bg-red-100 text-red-700">
-                              Blood: {call.patient.blood_group}
+                        )}
+
+                        {/* Incident Location & Live GPS */}
+                        <div className="flex items-start gap-2">
+                          <MapPin className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
+                          <div className="flex-1">
+                            <span className="font-semibold text-slate-900 block leading-tight">{call.address_text || userLocation.city}</span>
+                            {call.coords && (
+                              <div className="flex items-center gap-2 mt-1">
+                                <span className="text-[11px] font-mono text-slate-500">
+                                  GPS: {call.coords.lat.toFixed(4)}, {call.coords.lng.toFixed(4)}
+                                </span>
+                                <a
+                                  href={`https://www.google.com/maps?q=${call.coords.lat},${call.coords.lng}`}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="text-[11px] text-blue-600 hover:underline font-semibold"
+                                >
+                                  View on Map ↗
+                                </a>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Allocated Ambulance Telemetry */}
+                        <div className="flex items-center gap-2 pt-1 border-t border-slate-100">
+                          <Truck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                          {call.assignedUnit ? (
+                            <span className="text-xs font-semibold text-emerald-800">
+                              Unit: <strong className="font-bold text-slate-900">{call.assignedUnit.vehicleNumber}</strong> • Officer: {call.assignedUnit.officerName}
+                            </span>
+                          ) : (
+                            <span className="text-xs text-amber-700 font-medium">
+                              Auto-matching nearest available ambulance... (Radius: {call.search_radius_meters || 5000}m)
                             </span>
                           )}
                         </div>
-                      )}
-
-                      {/* Incident Location & Live GPS */}
-                      <div className="flex items-start gap-2">
-                        <MapPin className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
-                        <div className="flex-1">
-                          <span className="font-semibold text-slate-900 block leading-tight">{call.address_text || userLocation.city}</span>
-                          {call.coords && (
-                            <div className="flex items-center gap-2 mt-1">
-                              <span className="text-[11px] font-mono text-slate-500">
-                                GPS: {call.coords.lat.toFixed(4)}, {call.coords.lng.toFixed(4)}
-                              </span>
-                              <a
-                                href={`https://www.google.com/maps?q=${call.coords.lat},${call.coords.lng}`}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="text-[11px] text-blue-600 hover:underline font-semibold"
-                              >
-                                View on Map ↗
-                              </a>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-
-                      {/* Allocated Ambulance Telemetry */}
-                      <div className="flex items-center gap-2 pt-1 border-t border-slate-100">
-                        <Truck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                        {call.assignedUnit ? (
-                          <span className="text-xs font-semibold text-emerald-800">
-                            Unit: <strong className="font-bold text-slate-900">{call.assignedUnit.vehicleNumber}</strong> • Officer: {call.assignedUnit.officerName}
-                          </span>
-                        ) : (
-                          <span className="text-xs text-amber-700 font-medium">
-                            Auto-matching nearest available ambulance... (Radius: {call.search_radius_meters || 5000}m)
-                          </span>
-                        )}
                       </div>
                     </div>
-                  </div>
 
-                  <div className="pt-3 border-t border-slate-100 flex items-center justify-between">
-                    <span className="text-[11px] text-slate-400">
-                      Auto-syncing every 3s
-                    </span>
-                    <button
-                      onClick={() => setSelectedIncidentForDispatch(call)}
-                      className="px-3.5 py-1.5 rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-xs flex items-center gap-1.5 shadow-sm transition-all"
-                    >
-                      <AlertTriangle className="w-3.5 h-3.5" />
-                      <span>Manual Override</span>
-                    </button>
+                    <div className="pt-3 border-t border-slate-100 flex items-center justify-between">
+                      <span className="text-[11px] text-slate-400">
+                        Auto-syncing every 3s
+                      </span>
+                      <button
+                        onClick={() => setSelectedIncidentForDispatch(call)}
+                        className="px-3.5 py-1.5 rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-xs flex items-center gap-1.5 shadow-sm transition-all"
+                      >
+                        <AlertTriangle className="w-3.5 h-3.5" />
+                        <span>Manual Override</span>
+                      </button>
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           ) : (
             <div className="bg-white p-12 rounded-3xl border border-slate-200/80 text-center">
@@ -698,7 +912,136 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 Zero Active Emergencies Pending
               </h3>
               <p className="text-xs text-slate-500 max-w-sm mx-auto">
-                No open emergency calls. When a citizen triggers an SOS, the incident appears here automatically with live telemetry.
+                {isMainAdmin 
+                  ? 'No open emergency calls across any sector.' 
+                  : `No open emergency calls within your 10 KM sector radius (${subAdminArea?.sector}).`}
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Tab: Incident History (Platform-wide for Main Admin; 10 KM Sector-scoped for Sub-Admin) */}
+      {activeTab === 'HISTORY' && (
+        <div className="space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                <History className="w-5 h-5 text-slate-700" />
+                <span>
+                  {isMainAdmin 
+                    ? 'Global Incident Dispatch & Resolution History' 
+                    : `Sector Incident History: ${subAdminArea?.sector || 'Operational Zone'}`}
+                </span>
+              </h2>
+              <p className="text-xs text-slate-500">
+                {isMainAdmin
+                  ? 'Complete chronological record of all emergency dispatches across all regional sectors.'
+                  : `Historical requests located within your designated 10 KM operational jurisdiction (${subAdminArea?.lat.toFixed(4)}, ${subAdminArea?.lng.toFixed(4)}).`}
+              </p>
+            </div>
+            <span className="px-3 py-1 rounded-full text-xs font-bold bg-slate-100 text-slate-800 self-start">
+              {displayedHistoryCalls.length} Incidents Recorded
+            </span>
+          </div>
+
+          {displayedHistoryCalls.length > 0 ? (
+            <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="bg-slate-50 border-b border-slate-200 text-[11px] font-black uppercase tracking-wider text-slate-600">
+                      <th className="py-3 px-4">Incident ID</th>
+                      <th className="py-3 px-4">Date & Time</th>
+                      <th className="py-3 px-4">Citizen / Patient</th>
+                      <th className="py-3 px-4">Location / Address</th>
+                      {!isMainAdmin && <th className="py-3 px-4">Sector Distance</th>}
+                      <th className="py-3 px-4">Assigned Paramedic</th>
+                      <th className="py-3 px-4 text-right">Final Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 text-xs">
+                    {displayedHistoryCalls.map(item => {
+                      const distFromCenter = !isMainAdmin && subAdminArea && item.coords
+                        ? calculateDistanceKm(
+                            { latitude: subAdminArea.lat, longitude: subAdminArea.lng },
+                            { latitude: item.coords.lat, longitude: item.coords.lng }
+                          )
+                        : null;
+
+                      const formattedDate = item.created_at
+                        ? new Date(item.created_at).toLocaleString('en-US', {
+                            month: 'short',
+                            day: 'numeric',
+                            hour: '2-digit',
+                            minute: '2-digit'
+                          })
+                        : 'Recent';
+
+                      return (
+                        <tr key={item.id} className="hover:bg-slate-50/80 transition-colors">
+                          <td className="py-3 px-4 font-mono font-bold text-slate-900">
+                            #{item.id.slice(0, 8)}
+                          </td>
+                          <td className="py-3 px-4 text-slate-500 whitespace-nowrap">
+                            {formattedDate}
+                          </td>
+                          <td className="py-3 px-4">
+                            <div className="font-semibold text-slate-900">{item.patient?.full_name || 'Citizen User'}</div>
+                            <div className="text-[11px] text-slate-500 font-mono">{item.patient?.phone_number || ''}</div>
+                          </td>
+                          <td className="py-3 px-4 max-w-xs truncate text-slate-700">
+                            <span title={item.address_text || 'GPS Coords'}>{item.address_text || 'GPS Coordinates'}</span>
+                            {item.coords && (
+                              <a
+                                href={`https://www.google.com/maps?q=${item.coords.lat},${item.coords.lng}`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="block text-[10px] text-blue-600 hover:underline font-mono"
+                              >
+                                {item.coords.lat.toFixed(4)}, {item.coords.lng.toFixed(4)} ↗
+                              </a>
+                            )}
+                          </td>
+                          {!isMainAdmin && (
+                            <td className="py-3 px-4 font-semibold text-blue-700">
+                              {distFromCenter !== null ? `${distFromCenter.toFixed(2)} km` : 'In 10km zone'}
+                            </td>
+                          )}
+                          <td className="py-3 px-4">
+                            {item.assignedUnit ? (
+                              <div>
+                                <span className="font-bold text-slate-900">{item.assignedUnit.vehicleNumber}</span>
+                                <span className="text-[11px] text-slate-500 block">{item.assignedUnit.officerName}</span>
+                              </div>
+                            ) : (
+                              <span className="text-slate-400 italic">None assigned</span>
+                            )}
+                          </td>
+                          <td className="py-3 px-4 text-right">
+                            <span className={`inline-block px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase ${
+                              item.current_status === 'EMERGENCY_RESOLVED' ? 'bg-emerald-100 text-emerald-800' :
+                              item.current_status === 'EMERGENCY_CANCELLED' ? 'bg-slate-100 text-slate-600' :
+                              'bg-amber-100 text-amber-800'
+                            }`}>
+                              {item.current_status.replace(/_/g, ' ')}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : (
+            <div className="bg-white p-12 rounded-3xl border border-slate-200/80 text-center">
+              <History className="w-10 h-10 text-slate-300 mx-auto mb-3" />
+              <h3 className="text-sm font-bold text-slate-900 mb-1">No Incident History Found</h3>
+              <p className="text-xs text-slate-500">
+                {isMainAdmin 
+                  ? 'No past emergency requests recorded on the platform yet.'
+                  : `No past emergency requests recorded within your 10 KM designated sector (${subAdminArea?.sector}).`}
               </p>
             </div>
           )}
@@ -730,14 +1073,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 <div key={sub.id} className="py-5 space-y-3">
                   <div className="flex items-center justify-between">
                     <div>
-                      <div className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                      <div className="text-sm font-bold text-slate-900 flex items-center gap-2 flex-wrap">
                         <span>{sub.full_name}</span>
                         <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-blue-100 text-blue-700">
                           SUB-ADMIN
                         </span>
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200 flex items-center gap-1">
+                          <Compass className="w-3 h-3 text-indigo-500" />
+                          <span>{sub.area?.sector || 'Central Sector'} • 10 KM Radius</span>
+                        </span>
                       </div>
-                      <div className="text-xs text-slate-500 mt-0.5">
-                        {sub.email} • {sub.phone_number}
+                      <div className="text-xs text-slate-500 mt-1 flex items-center gap-2 flex-wrap">
+                        <span>{sub.email} • {sub.phone_number}</span>
+                        {sub.area && (
+                          <span className="font-mono text-slate-700 bg-slate-100 px-2 py-0.5 rounded text-[11px]">
+                            Center GPS: {sub.area.lat?.toFixed(4)}, {sub.area.lng?.toFixed(4)}
+                          </span>
+                        )}
                       </div>
                     </div>
 
@@ -1066,6 +1418,75 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 />
               </div>
 
+              {/* Area-Wise Sub-Admin Assignment with Coordinates and 10 KM Radius */}
+              <div className="pt-2 border-t border-slate-100">
+                <div className="flex items-center justify-between mb-2">
+                  <label className="block text-xs font-bold text-slate-900 uppercase tracking-wider">
+                    Designated Sector & Geofence Center
+                  </label>
+                  <button
+                    type="button"
+                    onClick={handleDetectLocationForSubAdmin}
+                    className="text-[11px] font-bold text-blue-600 hover:text-blue-700 flex items-center gap-1"
+                  >
+                    <Compass className={`w-3.5 h-3.5 ${detectingGps ? 'animate-spin' : ''}`} />
+                    <span>{detectingGps ? 'Detecting...' : 'Detect GPS'}</span>
+                  </button>
+                </div>
+
+                <div className="space-y-2.5 bg-blue-50/60 p-3.5 rounded-2xl border border-blue-100">
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                      Sector / Zone Name
+                    </label>
+                    <input
+                      type="text"
+                      value={newSubSector}
+                      onChange={e => setNewSubSector(e.target.value)}
+                      placeholder="e.g. Tambaram Sector, Anna Nagar Sector"
+                      className="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs text-slate-900 bg-white focus:ring-2 focus:ring-blue-500"
+                      required
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                        Latitude
+                      </label>
+                      <input
+                        type="number"
+                        step="0.0001"
+                        value={newSubLat}
+                        onChange={e => setNewSubLat(e.target.value)}
+                        placeholder="13.0827"
+                        className="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs text-slate-900 bg-white font-mono"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                        Longitude
+                      </label>
+                      <input
+                        type="number"
+                        step="0.0001"
+                        value={newSubLng}
+                        onChange={e => setNewSubLng(e.target.value)}
+                        placeholder="80.2707"
+                        className="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs text-slate-900 bg-white font-mono"
+                        required
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 p-2 rounded-xl bg-blue-100/70 text-blue-900 text-xs font-semibold">
+                    <span className="w-2 h-2 rounded-full bg-blue-600 shrink-0" />
+                    <span>Fixed 10 KM Operational Radius: Emergency requests within 10 KM will automatically route to this Sub-Admin.</span>
+                  </div>
+                </div>
+              </div>
+
               {/* Granular Permission Checkboxes */}
               <div className="pt-2">
                 <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">
@@ -1128,7 +1549,103 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   className="flex-1 py-2.5 rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-xs shadow-md flex items-center justify-center gap-1.5"
                 >
                   {subAdminSubmitting && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
-                  <span>Create Sub-Admin</span>
+                  <span>Appoint Sub-Admin</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Profile Modal */}
+      {showProfileModal && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl p-6 sm:p-8 max-w-md w-full shadow-2xl border border-slate-200 animate-in fade-in">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <User className="w-5 h-5 text-slate-900" />
+                <h3 className="text-lg font-bold text-slate-900">Administrator Profile</h3>
+              </div>
+              <button onClick={() => setShowProfileModal(false)} className="text-slate-400 hover:text-slate-600">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="mb-4 p-3 rounded-2xl bg-slate-50 border border-slate-200/80">
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Access Role</span>
+                <span className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase ${
+                  isMainAdmin ? 'bg-red-100 text-red-700' : 'bg-blue-100 text-blue-700'
+                }`}>
+                  {isMainAdmin ? 'Main Administrator' : 'Sub-Administrator'}
+                </span>
+              </div>
+              {!isMainAdmin && subAdminArea && (
+                <div className="text-xs text-slate-700 mt-2 pt-2 border-t border-slate-200">
+                  <div className="font-semibold text-slate-900">Assigned Operational Sector:</div>
+                  <div className="text-blue-700 font-bold">{subAdminArea.sector} (Fixed 10 KM Radius)</div>
+                  <div className="text-[11px] text-slate-500 font-mono">
+                    Center: {subAdminArea.lat.toFixed(4)}, {subAdminArea.lng.toFixed(4)}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <form onSubmit={handleSaveProfile} className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                  Full Name
+                </label>
+                <input
+                  type="text"
+                  value={profileName}
+                  onChange={e => setProfileName(e.target.value)}
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-xs text-slate-900 focus:ring-2 focus:ring-slate-900"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                  Email Address
+                </label>
+                <input
+                  type="email"
+                  value={profileEmail}
+                  onChange={e => setProfileEmail(e.target.value)}
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-xs text-slate-900 focus:ring-2 focus:ring-slate-900"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                  Phone Number
+                </label>
+                <input
+                  type="text"
+                  value={profilePhone}
+                  onChange={e => setProfilePhone(e.target.value)}
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-xs text-slate-900 focus:ring-2 focus:ring-slate-900"
+                  required
+                />
+              </div>
+
+              <div className="flex gap-2 pt-4">
+                <button
+                  type="button"
+                  onClick={() => setShowProfileModal(false)}
+                  className="flex-1 py-2.5 rounded-xl border border-slate-300 text-slate-700 font-bold text-xs"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={profileSaving}
+                  className="flex-1 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs shadow-md flex items-center justify-center gap-1.5"
+                >
+                  {profileSaving ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                  <span>Save Profile</span>
                 </button>
               </div>
             </form>

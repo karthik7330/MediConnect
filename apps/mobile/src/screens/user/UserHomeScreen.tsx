@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Alert, ActivityIndicator, ScrollView, Image } from 'react-native';
 import * as Location from 'expo-location';
-import { ShieldAlert, MapPin, XCircle, Clock, WifiOff, Users, ArrowLeftRight, Navigation, MessageSquare, LogOut, Phone, ExternalLink, Truck } from 'lucide-react-native';
+import { ShieldAlert, MapPin, XCircle, Clock, WifiOff, Users, ArrowLeftRight, Navigation, MessageSquare, LogOut, Phone, ExternalLink, Truck, User, History } from 'lucide-react-native';
 import { theme } from '../../lib/theme';
 import { supabase } from '../../lib/supabase';
 import { offlineQueueService } from '../../services/offlineQueue';
@@ -19,6 +19,8 @@ interface UserHomeScreenProps {
   onOpenContacts?: () => void;
   onOpenLiveTracking?: (id: string) => void;
   onOpenFeedback?: (id: string) => void;
+  onOpenProfile?: () => void;
+  onOpenHistory?: () => void;
   userProfile?: Profile | null;
 }
 
@@ -27,6 +29,8 @@ export const UserHomeScreen: React.FC<UserHomeScreenProps> = ({
   onOpenContacts, 
   onOpenLiveTracking, 
   onOpenFeedback,
+  onOpenProfile,
+  onOpenHistory,
   userProfile
 }) => {
   const [isActivating, setIsActivating] = useState(false);
@@ -244,14 +248,34 @@ export const UserHomeScreen: React.FC<UserHomeScreenProps> = ({
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       {/* Top Header */}
       <View style={styles.header}>
-        <View>
+        <View style={{ flex: 1 }}>
           <Text style={styles.greeting}>Welcome, {userProfile?.fullName || 'Citizen'}</Text>
-          <Text style={styles.roleTag}>Normal User Dashboard</Text>
+          <Text style={styles.roleTag}>Citizen Safety Dashboard</Text>
         </View>
-        <TouchableOpacity style={styles.switchButton} onPress={onSwitchRole}>
-          <LogOut size={16} color={theme.colors.accent} />
-          <Text style={styles.switchButtonText}>Sign Out</Text>
-        </TouchableOpacity>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+          {onOpenHistory && (
+            <TouchableOpacity 
+              style={[styles.switchButton, { backgroundColor: '#F1F5F9', borderColor: '#CBD5E1' }]} 
+              onPress={onOpenHistory}
+            >
+              <History size={14} color="#0F172A" />
+              <Text style={[styles.switchButtonText, { color: '#0F172A' }]}>History</Text>
+            </TouchableOpacity>
+          )}
+          {onOpenProfile && (
+            <TouchableOpacity 
+              style={[styles.switchButton, { backgroundColor: '#F1F5F9', borderColor: '#CBD5E1' }]} 
+              onPress={onOpenProfile}
+            >
+              <User size={14} color="#0F172A" />
+              <Text style={[styles.switchButtonText, { color: '#0F172A' }]}>Profile</Text>
+            </TouchableOpacity>
+          )}
+          <TouchableOpacity style={styles.switchButton} onPress={onSwitchRole}>
+            <LogOut size={14} color={theme.colors.accent} />
+            <Text style={styles.switchButtonText}>Sign Out</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       {/* Offline Mode Banner */}
