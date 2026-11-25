@@ -249,7 +249,11 @@ RETURNS TABLE (
   vehicle_number TEXT,
   distance_meters DOUBLE PRECISION,
   reliability_score NUMERIC
-) AS $$
+) 
+LANGUAGE plpgsql 
+SECURITY INVOKER
+SET search_path = public, extensions
+AS $$
 BEGIN
   RETURN QUERY
   SELECT 
@@ -268,13 +272,18 @@ BEGIN
     )
   ORDER BY distance_meters ASC;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$$;
 
 -- Atomic Assignment Lock (Prevents Race Conditions)
 CREATE OR REPLACE FUNCTION accept_emergency_assignment(
   p_emergency_id UUID,
   p_ambulance_id UUID
-) RETURNS JSONB AS $$
+) 
+RETURNS JSONB 
+LANGUAGE plpgsql 
+SECURITY INVOKER
+SET search_path = public, extensions
+AS $$
 DECLARE
   v_current_status emergency_status;
   v_assigned UUID;
@@ -307,7 +316,7 @@ BEGIN
     RETURN jsonb_build_object('success', false, 'message', 'Emergency has already been accepted or cancelled');
   END IF;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$$;
 
 -- Enable Realtime for live tracking & emergencies
 ALTER PUBLICATION supabase_realtime ADD TABLE emergency_requests;
