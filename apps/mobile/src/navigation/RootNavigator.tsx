@@ -15,6 +15,7 @@ import { EmergencyHistoryScreen } from '../screens/common/EmergencyHistoryScreen
 import { notificationService } from '../services/notificationService';
 import { networkService } from '../services/networkService';
 import { firebaseService } from '../services/firebaseService';
+import { authService } from '../services/authService';
 import { WifiOff, Radio } from 'lucide-react-native';
 
 type AppScreen = 
@@ -31,9 +32,27 @@ export const RootNavigator: React.FC = () => {
   const [currentScreen, setCurrentScreen] = useState<AppScreen>('SPLASH');
   const [selectedRole, setSelectedRole] = useState<'NORMAL_USER' | 'EMERGENCY_CONTACT' | 'AMBULANCE_PERSONNEL'>('NORMAL_USER');
   const [userProfile, setUserProfile] = useState<Profile | null>(null);
+  const [restoredUser, setRestoredUser] = useState<Profile | null>(null);
   const [activeEmergencyId, setActiveEmergencyId] = useState<string>('EMG-20261119-994');
   const [feedbackVisible, setFeedbackVisible] = useState(false);
   const [isOnline, setIsOnline] = useState(true);
+
+  // Restore authenticated session from persistent AsyncStorage on app launch
+  useEffect(() => {
+    const restoreSession = async () => {
+      try {
+        const saved = await authService.getCurrentUser();
+        if (saved && saved.id && saved.role) {
+          setUserProfile(saved);
+          setSelectedRole(saved.role as 'NORMAL_USER' | 'EMERGENCY_CONTACT' | 'AMBULANCE_PERSONNEL');
+          setRestoredUser(saved);
+        }
+      } catch (err) {
+        console.warn('[RootNavigator] Session restore error:', err);
+      }
+    };
+    restoreSession();
+  }, []);
 
   // Initialize Global Push Notifications, Network Listener, and Firebase Dual-Cloud Service
   useEffect(() => {
@@ -69,7 +88,17 @@ export const RootNavigator: React.FC = () => {
 
   // 1. Splash Opening Animation Screen
   if (currentScreen === 'SPLASH') {
-    return <SplashScreen onFinish={() => setCurrentScreen('AUTH_HOME')} />;
+    return (
+      <SplashScreen 
+        onFinish={() => {
+          if (userProfile || restoredUser) {
+            setCurrentScreen('DASHBOARD');
+          } else {
+            setCurrentScreen('AUTH_HOME');
+          }
+        }} 
+      />
+    );
   }
 
   // 2. Primary Mobile Home Auth Screen (Sign In, Sign Up, Forgot Password)
@@ -151,8 +180,14 @@ export const RootNavigator: React.FC = () => {
   }
 
   // 8. Sign Out / Change Role Action
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    try {
+      await authService.logout();
+    } catch (err) {
+      console.warn('[RootNavigator] Logout error:', err);
+    }
     setUserProfile(null);
+    setRestoredUser(null);
     setCurrentScreen('AUTH_HOME');
   };
 

@@ -1,6 +1,20 @@
 import * as Notifications from 'expo-notifications';
+import * as TaskManager from 'expo-task-manager';
 import { Platform } from 'react-native';
 import { supabase } from '../lib/supabase';
+
+export const BACKGROUND_NOTIFICATION_TASK = 'MEDICONNECT_BACKGROUND_NOTIFICATION_TASK';
+
+// Define background notification task to process notifications when app is in background or terminated
+TaskManager.defineTask(BACKGROUND_NOTIFICATION_TASK, async ({ data, error }: any) => {
+  if (error) {
+    console.warn('[NotificationService] Background notification task error:', error);
+    return;
+  }
+  if (data) {
+    console.log('[NotificationService] Background notification payload received:', data);
+  }
+});
 
 // Configure foreground notification behavior
 Notifications.setNotificationHandler({
@@ -60,6 +74,16 @@ export const notificationService = {
       if (finalStatus !== 'granted') {
         console.warn('[NotificationService] Push notification permission not granted.');
         return null;
+      }
+
+      // Register background notification task for terminated / background app state
+      try {
+        const isRegistered = await TaskManager.isTaskRegisteredAsync(BACKGROUND_NOTIFICATION_TASK);
+        if (!isRegistered) {
+          await Notifications.registerTaskAsync(BACKGROUND_NOTIFICATION_TASK);
+        }
+      } catch {
+        // Ignore in environments where background tasks are restricted
       }
 
       // Attempt to retrieve Expo push token
