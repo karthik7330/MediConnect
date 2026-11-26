@@ -40,7 +40,7 @@ import { mapNavigationService } from '../../services/mapNavigationService';
 import { distanceService } from '../../services/distanceService';
 import { notificationService } from '../../services/notificationService';
 import { LiveMapCard } from '../../components/common/LiveMapCard';
-import { Profile } from '@mediconnect/shared';
+import { Profile, STATUS_LABELS, EmergencyStatus } from '@mediconnect/shared';
 
 interface ContactHomeScreenProps {
   onSwitchRole: () => void;
@@ -79,6 +79,7 @@ export const ContactHomeScreen: React.FC<ContactHomeScreenProps> = ({
   const [respondingId, setRespondingId] = useState<string | null>(null);
   const [authorizedCitizenIds, setAuthorizedCitizenIds] = useState<string[]>([]);
   const authorizedIdsRef = useRef<string[]>([]);
+  const lastStatusRef = useRef<Record<string, string>>({});
 
   const contactPhone = userProfile?.phoneNumber || '';
   const contactUserId = userProfile?.id || '';
@@ -181,6 +182,9 @@ export const ContactHomeScreen: React.FC<ContactHomeScreenProps> = ({
 
       if (data) {
         setActiveEmergency(data);
+        if (!lastStatusRef.current[data.id]) {
+          lastStatusRef.current[data.id] = data.current_status;
+        }
         const hasAccepted = data.assigned_ambulance_id && data.current_status !== 'SOS_ACTIVATED';
         if (hasAccepted) {
           fetchAmbulanceTelemetry(data.assigned_ambulance_id, data.id);
@@ -206,14 +210,54 @@ export const ContactHomeScreen: React.FC<ContactHomeScreenProps> = ({
       .channel(channelId)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'emergency_requests' }, (payload: any) => {
         if (payload.new && authorizedIdsRef.current.includes(payload.new.user_id)) {
-          // Send SOS alert notification to the emergency contact
-          if (payload.eventType === 'INSERT' || payload.new.current_status === 'SOS_ACTIVATED') {
-            notificationService.dispatchSosAlert({
-              emergencyId: payload.new.id,
-              patientName: payload.new.patient?.full_name || 'Your Connected Family Member',
-              locationText: payload.new.address_text || 'Live GPS Incident Coordinates'
+          const emergencyId = payload.new.id;
+          const currentStatus = payload.new.current_status as EmergencyStatus;
+          const previousStatus = lastStatusRef.current[emergencyId];
+
+          // Send SOS alert notification to the emergency contact on initial activation
+          if (payload.eventType === 'INSERT' || currentStatus === 'SOS_ACTIVATED') {
+            if (!previousStatus || previousStatus !== 'SOS_ACTIVATED') {
+              const matchedCitizen = connectedCitizens.find((c: any) => c.sender_user_id === payload.new.user_id);
+              const patientName = payload.new.patient?.full_name || matchedCitizen?.sender_name || 'Your Connected Family Member';
+              notificationService.dispatchSosAlert({
+                emergencyId: payload.new.id,
+                patientName: patientName,
+                locationText: payload.new.address_text || 'Live GPS Incident Coordinates'
+              });
+            }
+          } 
+          // Send push & audio notification on EVERY progression step advanced by Ambulance Driver
+          else if (currentStatus && currentStatus !== previousStatus) {
+            const matchedCitizen = connectedCitizens.find((c: any) => c.sender_user_id === payload.new.user_id);
+            const patientName = activeEmergency?.patient?.full_name || matchedCitizen?.sender_name || 'Your Family Member';
+            const statusLabel = STATUS_LABELS[currentStatus] || currentStatus;
+
+            let details = `Emergency status advanced to ${statusLabel}.`;
+            if (currentStatus === 'REQUEST_ACCEPTED') {
+              details = `Paramedic unit accepted the emergency dispatch for ${patientName}.`;
+            } else if (currentStatus === 'AMBULANCE_DISPATCHED') {
+              details = `Ambulance unit dispatched and heading toward ${patientName}'s location.`;
+            } else if (currentStatus === 'AMBULANCE_ON_THE_WAY') {
+              details = `Ambulance is en route with sirens active. Live GPS tracking is online.`;
+            } else if (currentStatus === 'AMBULANCE_ARRIVED') {
+              details = `Ambulance arrived at the scene. Paramedics attending to ${patientName}.`;
+            } else if (currentStatus === 'PATIENT_PICKED_UP') {
+              details = `${patientName} is secured inside ambulance, heading to trauma hospital.`;
+            } else if (currentStatus === 'PATIENT_REACHED_HOSPITAL') {
+              details = `Ambulance arrived at hospital trauma center. Medical handover underway.`;
+            } else if (currentStatus === 'EMERGENCY_RESOLVED') {
+              details = `Emergency completed safely. ${patientName} is under hospital medical care.`;
+            } else if (currentStatus === 'EMERGENCY_CANCELLED') {
+              details = `Emergency request for ${patientName} was cancelled.`;
+            }
+
+            notificationService.dispatchStatusUpdate({
+              statusLabel: `${patientName}: ${statusLabel}`,
+              details: details
             });
           }
+
+          lastStatusRef.current[emergencyId] = currentStatus;
 
           // Immediately apply new status to UI without waiting
           setActiveEmergency((prev: any) => {

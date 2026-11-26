@@ -145,7 +145,9 @@ export const notificationService = {
           title: `🏥 Emergency Update: ${params.statusLabel}`,
           body: params.details,
           sound: 'default',
-          data: { type: 'STATUS_UPDATE' }
+          priority: Notifications.AndroidNotificationPriority.MAX,
+          data: { type: 'STATUS_UPDATE' },
+          categoryIdentifier: 'STATUS_UPDATES'
         },
         trigger: null
       });

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Alert, ActivityIndicator, ScrollView, Image } from 'react-native';
 import * as Location from 'expo-location';
 import { ShieldAlert, MapPin, XCircle, Clock, WifiOff, Users, ArrowLeftRight, Navigation, MessageSquare, LogOut, Phone, ExternalLink, Truck, User, History } from 'lucide-react-native';
@@ -12,7 +12,7 @@ import { backgroundLocationService } from '../../services/backgroundLocationServ
 import { firebaseService } from '../../services/firebaseService';
 import { distanceService } from '../../services/distanceService';
 import { LiveMapCard } from '../../components/common/LiveMapCard';
-import { Profile } from '@mediconnect/shared';
+import { Profile, STATUS_LABELS, EmergencyStatus } from '@mediconnect/shared';
 
 interface UserHomeScreenProps {
   onSwitchRole: () => void;
@@ -49,6 +49,7 @@ export const UserHomeScreen: React.FC<UserHomeScreenProps> = ({
     ambulanceLat?: number;
     ambulanceLng?: number;
   } | null>(null);
+  const lastUserStatusRef = useRef<string | null>(null);
 
   // Synchronize live emergency status and assigned nearest ambulance crew
   useEffect(() => {
@@ -89,6 +90,9 @@ export const UserHomeScreen: React.FC<UserHomeScreenProps> = ({
 
       if (data) {
         setEmergencyStatus(data.current_status);
+        if (!lastUserStatusRef.current) {
+          lastUserStatusRef.current = data.current_status;
+        }
         if (data.assigned_ambulance_id) {
           fetchCrewInfo(data.assigned_ambulance_id);
         }
@@ -99,6 +103,35 @@ export const UserHomeScreen: React.FC<UserHomeScreenProps> = ({
     // Subscribe to real-time status updates (REQUEST_ACCEPTED, AMBULANCE_ON_THE_WAY, etc.)
     const unsubscribe = emergencyService.subscribeToStatus(activeEmergencyId, async (newStatus, data) => {
       setEmergencyStatus(newStatus);
+
+      // Trigger high-priority status notification on citizen phone for every advance step
+      if (newStatus && newStatus !== lastUserStatusRef.current && newStatus !== 'SOS_ACTIVATED') {
+        const label = STATUS_LABELS[newStatus as EmergencyStatus] || newStatus;
+        let details = `Incident advanced to ${label}.`;
+        if (newStatus === 'REQUEST_ACCEPTED') {
+          details = 'Ambulance crew accepted your request and initiated GPS route.';
+        } else if (newStatus === 'AMBULANCE_DISPATCHED') {
+          details = 'Ambulance has been dispatched to your location.';
+        } else if (newStatus === 'AMBULANCE_ON_THE_WAY') {
+          details = 'Ambulance is en route with sirens active. Track live on your map.';
+        } else if (newStatus === 'AMBULANCE_ARRIVED') {
+          details = 'Ambulance has arrived at your location. Responders on site.';
+        } else if (newStatus === 'PATIENT_PICKED_UP') {
+          details = 'Patient onboard. Ambulance proceeding to trauma hospital.';
+        } else if (newStatus === 'PATIENT_REACHED_HOSPITAL') {
+          details = 'Ambulance arrived at the hospital trauma emergency department.';
+        } else if (newStatus === 'EMERGENCY_RESOLVED') {
+          details = 'Emergency resolved safely. Medical team notified.';
+        } else if (newStatus === 'EMERGENCY_CANCELLED') {
+          details = 'Emergency incident was cancelled.';
+        }
+
+        notificationService.dispatchStatusUpdate({
+          statusLabel: label,
+          details
+        });
+      }
+      lastUserStatusRef.current = newStatus;
 
       if (data && data.assigned_ambulance_id) {
         fetchCrewInfo(data.assigned_ambulance_id);
