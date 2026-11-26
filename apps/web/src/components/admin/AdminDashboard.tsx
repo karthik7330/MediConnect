@@ -489,6 +489,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   // Paramedic crew approval
   const handleApproveCrew = async (crewId: string) => {
     await supabase.from('ambulance_crews').update({ is_approved: true }).eq('id', crewId);
+    await supabase.from('profiles').update({ is_approved: true }).eq('id', crewId);
     setFleetList(prev => prev.map(c => c.id === crewId ? { ...c, is_approved: true } : c));
     setAuditLogs(prev => [{
       id: Date.now().toString(),

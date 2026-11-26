@@ -659,37 +659,65 @@ export const AmbulanceHomeScreen: React.FC<AmbulanceHomeScreenProps> = ({
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      {/* Header */}
-      <View style={styles.header}>
-        <View style={{ flex: 1 }}>
-          <Text style={styles.greeting}>Crew Command</Text>
-          <Text style={styles.roleTag}>
-            {userProfile?.fullName || 'Paramedic Unit Officer'} • TN-01-AMB-4091
-          </Text>
-        </View>
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-          {onOpenHistory && (
-            <TouchableOpacity 
-              style={[styles.switchButton, { backgroundColor: '#F1F5F9', borderColor: '#CBD5E1' }]} 
-              onPress={onOpenHistory}
-            >
-              <History size={14} color="#0F172A" />
-              <Text style={[styles.switchButtonText, { color: '#0F172A' }]}>History</Text>
-            </TouchableOpacity>
-          )}
-          {onOpenProfile && (
-            <TouchableOpacity 
-              style={[styles.switchButton, { backgroundColor: '#F1F5F9', borderColor: '#CBD5E1' }]} 
-              onPress={onOpenProfile}
-            >
-              <User size={14} color="#0F172A" />
-              <Text style={[styles.switchButtonText, { color: '#0F172A' }]}>Profile</Text>
-            </TouchableOpacity>
-          )}
-          <TouchableOpacity style={styles.switchButton} onPress={onSwitchRole}>
-            <LogOut size={16} color={theme.colors.accent} />
-            <Text style={styles.switchButtonText}>Sign Out</Text>
+      {/* Top Header Card */}
+      <View style={styles.headerCard}>
+        {/* Row 1: Profile Greeting & Sign Out */}
+        <View style={styles.headerTopRow}>
+          <View style={styles.avatarAndGreeting}>
+            <View style={[styles.avatarCircle, { backgroundColor: '#EFF6FF', borderColor: '#BFDBFE' }]}>
+              <Text style={[styles.avatarText, { color: '#1D4ED8' }]}>
+                {(userProfile?.fullName || 'P').charAt(0).toUpperCase()}
+              </Text>
+            </View>
+            <View style={styles.greetingContainer}>
+              <Text style={styles.welcomeSubtext}>Crew Command</Text>
+              <Text style={styles.greetingName} numberOfLines={1}>
+                {userProfile?.fullName || 'Paramedic Unit Officer'}
+              </Text>
+            </View>
+          </View>
+
+          <TouchableOpacity 
+            style={styles.signOutBtn} 
+            onPress={onSwitchRole}
+            activeOpacity={0.7}
+          >
+            <LogOut size={13} color="#DC2626" />
+            <Text style={styles.signOutText}>Sign Out</Text>
           </TouchableOpacity>
+        </View>
+
+        {/* Row 2: Status Indicator & Quick Access Bar */}
+        <View style={styles.headerNavRow}>
+          <View style={styles.portalBadge}>
+            <View style={[styles.pulseDot, { backgroundColor: isApproved ? '#16A34A' : '#D97706' }]} />
+            <Text style={[styles.portalBadgeText, { color: isApproved ? '#15803D' : '#B45309' }]}>
+              {isApproved ? 'Verified Unit • Online Ready' : 'Field Unit Active'}
+            </Text>
+          </View>
+
+          <View style={styles.navActionsGroup}>
+            {onOpenHistory && (
+              <TouchableOpacity 
+                style={styles.navPillBtn} 
+                onPress={onOpenHistory}
+                activeOpacity={0.7}
+              >
+                <History size={12} color="#1E293B" />
+                <Text style={styles.navPillText}>History</Text>
+              </TouchableOpacity>
+            )}
+            {onOpenProfile && (
+              <TouchableOpacity 
+                style={styles.navPillBtn} 
+                onPress={onOpenProfile}
+                activeOpacity={0.7}
+              >
+                <User size={12} color="#1E293B" />
+                <Text style={styles.navPillText}>Profile</Text>
+              </TouchableOpacity>
+            )}
+          </View>
         </View>
       </View>
 
@@ -963,6 +991,130 @@ const styles = StyleSheet.create({
     padding: theme.spacing.lg,
     paddingTop: theme.spacing.xl * 1.2,
     paddingBottom: 40
+  },
+  headerCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    marginBottom: 16,
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 2
+  },
+  headerTopRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10
+  },
+  avatarAndGreeting: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    marginRight: 8
+  },
+  avatarCircle: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: '#EFF6FF',
+    borderWidth: 1.5,
+    borderColor: '#BFDBFE',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 10
+  },
+  avatarText: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#1D4ED8'
+  },
+  greetingContainer: {
+    flex: 1
+  },
+  welcomeSubtext: {
+    fontSize: 11,
+    color: '#64748B',
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5
+  },
+  greetingName: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: '#0F172A',
+    marginTop: 1
+  },
+  signOutBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FEF2F2',
+    borderWidth: 1,
+    borderColor: '#FECACA',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 20,
+    gap: 4
+  },
+  signOutText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#DC2626'
+  },
+  headerNavRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#F1F5F9'
+  },
+  portalBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F0FDF4',
+    borderWidth: 1,
+    borderColor: '#BBF7D0',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 12,
+    gap: 5
+  },
+  pulseDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#16A34A'
+  },
+  portalBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#15803D'
+  },
+  navActionsGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6
+  },
+  navPillBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 14,
+    gap: 4
+  },
+  navPillText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#334155'
   },
   header: {
     flexDirection: 'row',

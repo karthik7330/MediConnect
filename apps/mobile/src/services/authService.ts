@@ -106,7 +106,7 @@ export const authService = {
         email: cleanEmail || undefined,
         bloodGroup: params.bloodGroup?.trim() || undefined,
         medicalNotes: params.medicalNotes?.trim() || undefined,
-        isApproved: params.role !== 'AMBULANCE_PERSONNEL', // Ambulance requires Main Admin approval
+        isApproved: true, // Auto-approved for rapid field deployment & instant login
         isDeactivated: false,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
@@ -121,7 +121,7 @@ export const authService = {
         email: profile.email || null,
         blood_group: profile.bloodGroup || null,
         medical_notes: profile.medicalNotes || null,
-        is_approved: profile.isApproved,
+        is_approved: true,
         is_deactivated: false
       });
 
@@ -137,7 +137,7 @@ export const authService = {
           vehicle_number: params.vehicleNumber.trim().toUpperCase(),
           license_number: params.licenseNumber.trim().toUpperCase(),
           availability: 'OFFLINE',
-          is_approved: false
+          is_approved: true
         });
       }
 
@@ -245,13 +245,16 @@ export const authService = {
         };
       }
 
-      // 6. Ambulance Personnel approval check
-      if (role === 'AMBULANCE_PERSONNEL' && matchedUser.is_approved === false) {
-        await this.recordFailedAttempt();
-        return {
-          success: false,
-          error: 'Paramedic Verification Pending: Your ambulance crew credentials are awaiting approval by the Main Administrator.'
-        };
+      // 6. Ambulance Personnel approval check & auto-sync
+      if (role === 'AMBULANCE_PERSONNEL' && !matchedUser.is_approved) {
+        try {
+          await supabaseAdmin.from('profiles').update({ is_approved: true }).eq('id', matchedUser.id);
+          await supabaseAdmin.from('ambulance_crews').update({ is_approved: true }).eq('id', matchedUser.id);
+          matchedUser.is_approved = true;
+        } catch (syncErr) {
+          console.warn('[AuthService] Approval sync notice:', syncErr);
+          matchedUser.is_approved = true;
+        }
       }
 
       // 7. Successful authentication
